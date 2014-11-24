@@ -34,6 +34,8 @@ Revision History:
 #include "exit.h"
 #include "PairedAligner.h"
 #include "Error.h"
+#include "Util.h"
+#include "CommandProcessor.h"
 
 using std::max;
 using std::min;
@@ -70,11 +72,19 @@ AlignerContext::~AlignerContext()
 void AlignerContext::runAlignment(int argc, const char **argv, const char *version, unsigned *argsConsumed)
 {
     options = parseOptions(argc, argv, version, argsConsumed, isPaired());
-#ifdef _MSC_VER
-    useTimingBarrier = options->useTimingBarrier;
-#endif
 
-    initialize();
+	if (NULL == options) {	// Didn't parse correctly
+		*argsConsumed = argc;
+		return;
+	}
+
+#ifdef _MSC_VER
+	useTimingBarrier = options->useTimingBarrier;
+#endif
+	
+	if (!initialize()) {
+		return;
+	}
     extension->initialize();
     
     if (! extension->skipAlignment()) {
@@ -128,7 +138,7 @@ AlignerContext::finishThread(AlignerContext* common)
     extension = NULL;
 }
 
-    void
+    bool
 AlignerContext::initialize()
 {
     if (g_indexDirectory == NULL || strcmp(g_indexDirectory, options->indexDir) != 0) {
@@ -146,7 +156,7 @@ AlignerContext::initialize()
             index = GenomeIndex::loadFromDirectory((char*) options->indexDir, options->mapIndex, options->prefetchIndex);
             if (index == NULL) {
                 WriteErrorMessage("Index load failed, aborting.\n");
-                soft_exit(1);
+				return false;
             }
             g_index = index;
 
@@ -172,24 +182,26 @@ AlignerContext::initialize()
 
 	if (index != NULL && (int)minReadLength < index->getSeedLength()) {
 		WriteErrorMessage("The min read length (%d) must be at least the seed length (%d), or there's no hope of aligning reads that short.\n", minReadLength, index->getSeedLength());
-		soft_exit(1);
+		return false;
 	}
 
     if (options->perfFileName != NULL) {
         perfFile = fopen(options->perfFileName,"a");
         if (NULL == perfFile) {
             WriteErrorMessage("Unable to open perf file '%s'\n", options->perfFileName);
-            soft_exit(1);
+			return false;
         }
     }
 
     DataSupplier::ThreadCount = options->numThreads;
+
+    return true;
 }
 
     void
 AlignerContext::printStatsHeader()
 {
-    WriteStatusMessage("MaxHits\tMaxDist\t%%Used\t%%Unique\t%%Multi\t%%!Found\t%%Pairs\tlvCalls\tNumReads\tReads/s\n");
+	WriteStatusMessage("Total Reads    Aligned, MAPQ >= %2d    Aligned, MAPQ < %2d     Unaligned              Too Short/Too Many Ns  %%Pairs\tReads/s   Time in Aligner (s)\n", MAPQ_LIMIT_FOR_SINGLE_HIT, MAPQ_LIMIT_FOR_SINGLE_HIT);
 }
 
     void
@@ -270,33 +282,68 @@ AlignerContext::nextIteration()
     return false;
 }
 
+extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t outputBufferSize);	// Relying on the one in Util.h results in an "internal compiler error" for Visual Studio.
+
+//
+// Take an integer and a percentage, and turn it into a string of the form "number (percentage%)<padding>" where
+// number has commas and the whole thing is padded out with spaces to a specific length.
+//
+char *numPctAndPad(char *buffer, _uint64 num, double pct, size_t desiredWidth, size_t bufferLen)
+{
+	_ASSERT(desiredWidth < bufferLen);	// < to leave room for trailing null.
+
+	FormatUIntWithCommas(num, buffer, bufferLen);
+	const size_t percentageBufferSize = 100;	// Plenty big enough for any value
+	char percentageBuffer[percentageBufferSize];
+
+	sprintf(percentageBuffer, " (%.02f%%)", pct);
+	if (strlen(percentageBuffer) + strlen(buffer) >= bufferLen) {
+		WriteErrorMessage("numPctAndPad: overflowed output buffer\n");
+		soft_exit(1);
+	}
+
+	strcat(buffer, percentageBuffer);
+	for (size_t x = strlen(buffer); x < desiredWidth; x++) {
+		strcat(buffer, " ");
+	}
+
+	return buffer;
+}
+
     void
 AlignerContext::printStats()
 {
     double usefulReads = max((double) stats->usefulReads, 1.0);
 
-    WriteStatusMessage("%d\t%d\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%lld\t%lld\t%.0f (at: %lld)\n",
-            maxHits_, 
-            maxDist_, 
-            100.0 * usefulReads / max(stats->totalReads, (_int64) 1),
-            100.0 * stats->singleHits / usefulReads,
-            100.0 * stats->multiHits / usefulReads,
-            100.0 * stats->notFound / usefulReads,
-            100.0 * stats->alignedAsPairs / usefulReads,
-            stats->lvCalls,
-            stats->totalReads,
-            (1000.0 * usefulReads) / max(alignTime, (_int64) 1), 
-            alignTime);
+	const size_t strBufLen = 50;	// Way more than enough for 64 bit numbers with commas
+	char tooShort[strBufLen];
+	char single[strBufLen];
+	char multi[strBufLen];
+	char unaligned[strBufLen];
+	char numReads[strBufLen];
+	char readsPerSecond[strBufLen];
+	char alignTimeString[strBufLen];
+
+	WriteStatusMessage("%-14s %s %s %s %s %.02f%%%\t%-9s %s\n",
+		FormatUIntWithCommas(stats->totalReads, numReads, strBufLen),
+		numPctAndPad(single, stats->singleHits, 100.0 * stats->singleHits / stats->totalReads, 22, strBufLen),
+		numPctAndPad(multi, stats->multiHits, 100.0 * stats->multiHits / stats->totalReads, 22, strBufLen),
+		numPctAndPad(unaligned, stats->notFound, 100.0 * stats->notFound / stats->totalReads, 22, strBufLen),
+		numPctAndPad(tooShort, stats->totalReads - stats->usefulReads, 100.0 * (stats->totalReads - stats->usefulReads) / max(stats->totalReads, (_int64)1), 22, strBufLen),
+		100.0 * stats->alignedAsPairs / stats->totalReads,
+		FormatUIntWithCommas((unsigned _int64)(1000 * stats->totalReads / max(alignTime, (_int64)1)), readsPerSecond, strBufLen),	// Aligntime is in ms
+		FormatUIntWithCommas((alignTime + 500) / 1000, alignTimeString, strBufLen)
+		);
 
     if (NULL != perfFile) {
         fprintf(perfFile, "%d\t%d\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%lld\t%lld\tt%.0f\n",
                 maxHits_, maxDist_, 
                 100.0 * usefulReads / max(stats->totalReads, (_int64) 1),
-                100.0 * stats->singleHits / usefulReads,
-                100.0 * stats->multiHits / usefulReads,
-                100.0 * stats->notFound / usefulReads,
+				100.0 * stats->singleHits / stats->totalReads,
+				100.0 * stats->multiHits / stats->totalReads,
+				100.0 * stats->notFound / stats->totalReads,
                 stats->lvCalls,
-                100.0 * stats->alignedAsPairs / usefulReads,
+				100.0 * stats->alignedAsPairs / stats->totalReads,
                 stats->totalReads,
                 (1000.0 * usefulReads) / max(alignTime, (_int64) 1));
 
@@ -351,6 +398,8 @@ AlignerContext::parseOptions(
     if (argc < 3) {
         WriteErrorMessage("Too few parameters\n");
         options->usage();
+		delete options;
+		return NULL;
     }
 
     options->indexDir = argv[1];
@@ -378,9 +427,16 @@ AlignerContext::parseOptions(
         SNAPFile input;
         if (SNAPFile::generateFromCommandLine(argv+i, argc-i, &argsConsumed, &input, paired, true)) {
             if (input.isStdio) {
+				if (CommandPipe != NULL) {
+					WriteErrorMessage("You may not use stdin/stdout in daemon mode\n");
+					delete options;
+					return NULL;
+				}
+
                 if (inputFromStdio) {
                     WriteErrorMessage("You specified stdin ('-') specified for more than one input, which isn't permitted.\n");
-                    soft_exit(1);
+					delete options;
+					return NULL;
                 } else {
                     inputFromStdio = true;
                 }
@@ -401,6 +457,8 @@ AlignerContext::parseOptions(
         if (!options->parse(argv, argc, i, &done)) {
             WriteErrorMessage("Didn't understand options starting at %s\n", argv[oldI]);
             options->usage();
+			delete options;
+			return NULL;
         }
 
         if (done) {
@@ -411,18 +469,21 @@ AlignerContext::parseOptions(
 
     if (0 == nInputs) {
         WriteErrorMessage("No input files specified.\n");
-        soft_exit(1);
+		delete options;
+		return NULL;
     }
 
     if (options->maxDist + options->extraSearchDepth >= MAX_K) {
         WriteErrorMessage("You specified too large of a maximum edit distance combined with extra search depth.  The must add up to less than %d.\n", MAX_K);
         WriteErrorMessage("Either reduce their sum, or change MAX_K in LandauVishkin.h and recompile.\n");
-        soft_exit(1);
+		delete options;
+		return NULL;
     }
 
     if (options->maxSecondaryAlignmentAdditionalEditDistance > (int)options->extraSearchDepth) {
         WriteErrorMessage("You can't have the max edit distance for secondary alignments (-om) be bigger than the max search depth (-D)\n");
-        soft_exit(1);
+		delete options;
+		return NULL;
     }
 
     options->nInputs = nInputs;

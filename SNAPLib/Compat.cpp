@@ -30,6 +30,7 @@ Revision History:
 #include <aio.h>
 #include <err.h>
 #include <unistd.h>
+#include <signal.h>
 #endif
 #include "exit.h"
 #ifdef PROFILE_WAIT
@@ -891,6 +892,101 @@ void PreventMachineHibernationWhileThisThreadIsAlive()
 {
 	SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
 }
+
+struct NamedPipe {
+	HANDLE hPipe;
+};
+
+NamedPipe *OpenNamedPipe(const char *pipeName, bool serverSide)
+{
+	NamedPipe *pipe = new NamedPipe;
+	const char *prefix = "\\\\.\\pipe\\";
+
+	char *fullyQualifiedPipeName = new char[strlen(prefix) + strlen(pipeName) + 1];	// +1 for null
+
+	sprintf(fullyQualifiedPipeName, "%s%s", prefix, pipeName);
+
+	if (serverSide) {
+		pipe->hPipe = CreateNamedPipe(fullyQualifiedPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 100000, 100000, 0, NULL);
+		if (INVALID_HANDLE_VALUE == pipe->hPipe) {
+			WriteErrorMessage("OpenNamedPipe('%s'): unable to open pipe, %d\n", fullyQualifiedPipeName, GetLastError());
+			delete pipe;
+			return NULL;
+		}
+
+		if (!ConnectNamedPipe(pipe->hPipe, NULL) && ERROR_PIPE_CONNECTED != GetLastError()) {
+			WriteErrorMessage("Unable to connect named pipe, %d\n", GetLastError());
+			delete pipe;
+			return NULL;
+		}
+	} else {
+		pipe->hPipe = CreateFile(fullyQualifiedPipeName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+		while (INVALID_HANDLE_VALUE == pipe->hPipe && GetLastError() == ERROR_PIPE_BUSY) {
+			WriteStatusMessage("Server is busy.  Waiting.\n");
+			if (!WaitNamedPipe(fullyQualifiedPipeName, NMPWAIT_WAIT_FOREVER)) {
+				fprintf(stderr, "Waiting for server connection failed, %d\n", GetLastError());
+				delete pipe;
+				return NULL;
+			}
+			pipe->hPipe = CreateFile(fullyQualifiedPipeName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+		}
+
+		if (INVALID_HANDLE_VALUE == pipe->hPipe) {
+			WriteErrorMessage("Unable to open server connection '%s', %d\n", fullyQualifiedPipeName, GetLastError());
+			delete pipe;
+			return NULL;
+		}
+	}
+
+	return pipe;
+}
+
+bool ReadFromNamedPipe(NamedPipe *pipe, char *outputBuffer, size_t outputBufferSize)
+{
+	DWORD bytesRead;
+	while (!ReadFile(pipe->hPipe, outputBuffer, (DWORD)outputBufferSize, &bytesRead, NULL)) {
+		if (GetLastError() != ERROR_BROKEN_PIPE && GetLastError() != ERROR_NO_DATA) {
+			fprintf(stderr, "Read named pipe failed, %d\n", GetLastError());	// Don't use WriteErrorMessage, it will try to send on the pipe
+			return false;
+		}
+
+		if (GetLastError() == ERROR_BROKEN_PIPE) {
+			if (!DisconnectNamedPipe(pipe->hPipe)) {
+				fprintf(stderr, "Disconnect named pipe failed, %d; ignoring\n", GetLastError());
+			}
+			if (!ConnectNamedPipe(pipe->hPipe, NULL) && ERROR_PIPE_CONNECTED != GetLastError()) {
+				fprintf(stderr, "ReadFromNamedPipe: reconnecting to pipe failed, %d\n", GetLastError());
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool WriteToNamedPipe(NamedPipe *pipe, const char *stringToWrite)
+{
+	DWORD bytesWritten;
+	if (!WriteFile(pipe->hPipe, stringToWrite, (DWORD)strlen(stringToWrite) + 1, &bytesWritten, NULL)) {	// +1 sends terminating NULL
+		fprintf(stderr, "WriteToNamedPipe: write failed, %d\n", GetLastError());
+		return false;
+	}
+
+	FlushFileBuffers(pipe->hPipe);
+
+	if (bytesWritten != strlen(stringToWrite) + 1) {
+		fprintf(stderr, "WriteToNamedPipe:  expected to write %lld bytes, actually wrote %d\n", strlen(stringToWrite) + 1, bytesWritten);
+	}
+
+	return bytesWritten == strlen(stringToWrite) + 1;
+}
+
+void CloseNamedPipe(NamedPipe *pipe)
+{
+	CloseHandle(pipe->hPipe);
+	delete pipe;
+}
+
+const char *DEFAULT_NAMED_PIPE_NAME = "SNAP";
 #else   // _MSC_VER
 
 #if defined(__MACH__)
@@ -1853,6 +1949,242 @@ void PreventMachineHibernationWhileThisThreadIsAlive()
 {
 	// Only implemented for Windows
 }
+
+//
+// Linux named pipes are unidirectional, so we need two of them.
+//
+struct NamedPipe {
+    bool    serverSide;
+    char *  pipeName;
+    FILE *  input;
+    FILE *  output;
+};
+
+bool createPipe(const char *fullyQualifiedPipeName)
+{
+	if (mkfifo(fullyQualifiedPipeName, S_IRUSR | S_IWUSR)) {
+		if (errno != EEXIST) {
+			if (errno == ENOENT) {
+				WriteErrorMessage("OpenNamedPipe: unable to create named pipe at path '%s' because a directory in the path doesn't exist.  Please create it or use a different pipe name\n", fullyQualifiedPipeName);
+				return false;
+			}
+
+			if (errno == EACCES) {
+				WriteErrorMessage("OpenNamedPipe: unable to create named pipe at path '%s' because you do not have sufficient permissions.\n", fullyQualifiedPipeName);
+				return false;
+			}
+
+			if (errno == ENOTDIR) {
+				WriteErrorMessage("OpenNamedPipe: a component of your pipe path isn't a directory.  '%s'\n", fullyQualifiedPipeName);
+				return false;
+			}
+
+			WriteErrorMessage("OpenNamedPipe: unexpectedly failed to create named pipe '%s', errno %d\n", fullyQualifiedPipeName, errno);
+			return false;
+		}
+	}
+	return true;
+}
+
+FILE *connectPipe(char *fullyQualifiedPipeName, bool forInput) 
+{
+	FILE *pipeFile = fopen(fullyQualifiedPipeName, forInput ? "r" : "w");
+	if (NULL == pipeFile) {
+		WriteErrorMessage("OpenNamedPipe: unable to open pipe file '%s', errno %d\n", fullyQualifiedPipeName, errno);
+	}
+	return pipeFile;
+}
+
+char *createFullyQualifiedPipeName(const char *pipeName, bool serverSide, bool forInput)
+{
+    char *fullyQualifiedPipeName;
+	const char *defaultPipeDirectory = "/tmp/";
+	const char *pipeDirectory;
+	const char *toServer = "-toServer";
+	const char *toClient = "-toClient";
+
+	if (pipeName[0] != '/') {
+		pipeDirectory = defaultPipeDirectory;
+	} else {
+		pipeDirectory = "";
+	}
+
+	fullyQualifiedPipeName = new char[strlen(pipeDirectory) + strlen(pipeName) + __max(strlen(toServer), strlen(toClient)) + 1];	// +1 for trailing null
+
+	sprintf(fullyQualifiedPipeName, "%s%s%s", pipeDirectory, pipeName, (serverSide == forInput) ? toServer : toClient);
+
+	return fullyQualifiedPipeName;
+}
+
+bool connectNamedPipes(NamedPipe *pipe)
+{
+    char *inputPipeName = createFullyQualifiedPipeName(pipe->pipeName, pipe->serverSide, true);
+    char *outputPipeName = createFullyQualifiedPipeName(pipe->pipeName, pipe->serverSide, false);
+
+    if (pipe->input != NULL) {
+        fclose(pipe->input);
+        pipe->input = NULL;
+    }
+
+    if (pipe->output != NULL) {
+        fclose(pipe->output);
+        pipe->output = NULL;
+    }
+
+    //
+    // Connecting pipes is synchronous, so the server and client need to connect
+    // in opposite order.
+    //
+    if (pipe->serverSide) {
+        signal(SIGPIPE, SIG_IGN);// If the client hits ^C, we'll get this.  Ignore it, let the fwrite fail, and continue
+        pipe->input = connectPipe(inputPipeName,  true);
+        pipe->output = connectPipe(outputPipeName, false);
+	    //
+	    // Release any exclusive lock on the toServer pipe that may have been left by a now-dead client
+	    //
+	    flock lock;
+	    lock.l_type = F_UNLCK;
+	    lock.l_whence = SEEK_SET;
+	    lock.l_start = 0;
+	    lock.l_len = 1;
+	    lock.l_pid = 0;
+
+	    if (fcntl(fileno(pipe->output), F_SETLKW, &lock) < 0) {
+	        fprintf(stderr,"Unable to clear named pipe lock, errno %d\n", errno);
+	        delete pipe;
+	        return NULL;
+	    }
+    } else {
+        pipe->output = connectPipe(outputPipeName, false);
+        pipe->input = connectPipe(inputPipeName,  true);
+    }
+
+    delete [] inputPipeName;
+    delete [] outputPipeName;
+
+    return pipe->input != NULL && pipe->output != NULL;
+}
+
+
+NamedPipe *OpenNamedPipe(const char *pipeName, bool serverSide)
+{
+    char *inputPipeName = createFullyQualifiedPipeName(pipeName, serverSide, true);
+    char *outputPipeName = createFullyQualifiedPipeName(pipeName, serverSide, false);
+
+	NamedPipe *pipe = new NamedPipe;
+	pipe->pipeName = new char[strlen(pipeName) + 1];
+	strcpy(pipe->pipeName, pipeName);
+	pipe->input = pipe->output = NULL;
+	pipe->serverSide = serverSide;
+
+	if (serverSide) {
+	    if (!createPipe(inputPipeName)) {
+	        delete pipe;
+	        return NULL;
+	    }
+	    if (!createPipe(outputPipeName)) {
+	        delete pipe;
+	        return NULL;
+	    }
+	}
+
+
+	delete [] inputPipeName;
+	delete [] outputPipeName;
+
+	if (!connectNamedPipes(pipe)) {
+	    delete pipe;
+	    return NULL;
+	}
+
+	if (!serverSide) {
+	    //
+	    // Take an exclusive lock on the toServer pipe so that only one client is sending at a time.
+	    //
+	    flock lock;
+	    lock.l_type = F_WRLCK;
+	    lock.l_whence = SEEK_SET;
+	    lock.l_start = 0;
+	    lock.l_len = 1;
+	    lock.l_pid = 0;
+
+	    if (fcntl(fileno(pipe->output), F_SETLKW, &lock) < 0) {
+	        fprintf(stderr,"OpenNamedPipe: F_SETLKW failed, errno %d\n", errno);
+	        delete pipe;
+	        return NULL;
+	    }
+	}
+
+	return pipe;
+}
+
+
+//
+// Our Linux version of named pipe IO sends strings with 4 byte byte counts first.
+//
+bool ReadFromNamedPipe(NamedPipe *pipe, char *outputBuffer, size_t outputBufferSize)
+{
+    unsigned int size;
+
+    for (;;) {
+        if (1 != fread(&size, sizeof(size), 1, pipe->input)) {
+            if (!pipe->serverSide) {
+                return false;
+            }
+            if (!connectNamedPipes(pipe)) {
+                return false;
+            }
+            continue;
+        }
+
+        if (size >= outputBufferSize) {
+            WriteErrorMessage("Trying to read too big a chunk from named pipe, %d >= %lld\n", size, outputBufferSize);
+            return false;
+        }
+
+        if (1 != fread(outputBuffer, size, 1, pipe->input)) {
+            if (!pipe->serverSide) {
+                return false;
+            }
+            if (!connectNamedPipes(pipe)) {
+                return false;
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    outputBuffer[size] = '\0';
+    return true;
+}
+
+bool WriteToNamedPipe(NamedPipe *pipe, const char *stringToWrite)
+{
+    unsigned int size = (unsigned int)strlen(stringToWrite);
+
+    if (1 != fwrite(&size, sizeof(size), 1, pipe->output)) {
+        return false;
+    }
+
+    if (1 != fwrite(stringToWrite, size, 1, pipe->output)) {
+        return false;
+    }
+
+    fflush(pipe->output);
+
+    return true;
+}
+
+void CloseNamedPipe(NamedPipe *pipe)
+{
+	fclose(pipe->input);
+	fclose(pipe->output);
+	delete pipe;
+}
+
+const char *DEFAULT_NAMED_PIPE_NAME = "SNAP";
+
 #endif  // _MSC_VER
 
 AsyncFile* AsyncFile::open(const char* filename, bool write)
