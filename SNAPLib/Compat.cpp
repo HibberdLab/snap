@@ -50,7 +50,7 @@ using std::max;
 
 void AcquireUnderlyingExclusiveLock(UnderlyingExclusiveLock *lock);
 bool WaitForSingleWaiterObject(SingleWaiterObject *singleWaiterObject);
-void WaitForEvent(EventObject *eventObject); 
+void WaitForEvent(EventObject *eventObject);
 
 using std::map;
 using std::string;
@@ -84,7 +84,7 @@ bool WaitForSingleWaiterObjectProfile(SingleWaiterObject *singleWaiterObject, co
 void WaitForEventProfile(EventObject *eventObject, const char* fn, int line)
 {
     _int64 start = timeInMillis();
-    WaitForEvent(eventObject); 
+    WaitForEvent(eventObject);
     addTime(fn, line, timeInMillis() - start);
 }
 
@@ -496,7 +496,7 @@ public:
         virtual bool beginWrite(void* buffer, size_t length, size_t offset, size_t *bytesWritten);
 
         virtual bool waitForCompletion();
-    
+
     private:
         WindowsAsyncFile*   file;
         bool                writing;
@@ -504,7 +504,7 @@ public:
     };
 
     virtual AsyncFile::Writer* getWriter();
-    
+
     class Reader : public AsyncFile::Reader
     {
     public:
@@ -515,7 +515,7 @@ public:
         virtual bool beginRead(void* buffer, size_t length, size_t offset, size_t *bytesRead);
 
         virtual bool waitForCompletion();
-    
+
     private:
         WindowsAsyncFile*   file;
         bool                reading;
@@ -691,7 +691,7 @@ FileMapper::FileMapper()
     initialized = false;
     pagesize = getpagesize();
     mapCount = 0;
-    
+
 #if 0
     hFilePrefetch = INVALID_HANDLE_VALUE;
     lap->hEvent = NULL;
@@ -760,7 +760,7 @@ FileMapper::init(const char *i_fileName)
 #endif
     initialized = true;
 
- 
+
     return true;
 }
 
@@ -785,7 +785,7 @@ FileMapper::createMapping(size_t offset, size_t amountToMap, void** o_mappedBase
     if (NULL == mappedBase) {
         WriteErrorMessage("Unable to map file, %d\n", GetLastError());
         return NULL;
-    } 
+    }
     char* mappedRegion = mappedBase + beginRounding;
 
 #if 0
@@ -825,10 +825,10 @@ FileMapper::~FileMapper()
 #endif
     CloseHandle(hMapping);
     CloseHandle(hFile);
-    WriteErrorMessage("FileMapper: %lld immediate completions, %lld delayed completions, %lld failures, %lld ms in readfile (%lld ms/call)\n",countOfImmediateCompletions, countOfDelayedCompletions, countOfFailures, millisSpentInReadFile, 
+    WriteErrorMessage("FileMapper: %lld immediate completions, %lld delayed completions, %lld failures, %lld ms in readfile (%lld ms/call)\n",countOfImmediateCompletions, countOfDelayedCompletions, countOfFailures, millisSpentInReadFile,
         millisSpentInReadFile/max(1, countOfImmediateCompletions + countOfDelayedCompletions + countOfFailures));
 }
-    
+
 #if 0
 void
 FileMapper::prefetch(size_t currentRead)
@@ -1352,7 +1352,7 @@ ReadLargeFile(
     void* buffer,
     size_t bytes)
 {
-    return fread(buffer, 1, bytes, file->file);    
+    return fread(buffer, 1, bytes, file->file);
 }
 
     void
@@ -1450,7 +1450,7 @@ public:
         virtual bool beginWrite(void* buffer, size_t length, size_t offset, size_t *bytesWritten);
 
         virtual bool waitForCompletion();
-    
+
     private:
         PosixAsyncFile*     file;
         bool                writing;
@@ -1460,7 +1460,7 @@ public:
     };
 
     virtual AsyncFile::Writer* getWriter();
-    
+
     class Reader : public AsyncFile::Reader
     {
     public:
@@ -1471,7 +1471,7 @@ public:
         virtual bool beginRead(void* buffer, size_t length, size_t offset, size_t *bytesRead);
 
         virtual bool waitForCompletion();
-    
+
     private:
         PosixAsyncFile*     file;
         bool                reading;
@@ -1686,7 +1686,7 @@ public:
         virtual bool beginWrite(void* buffer, size_t length, size_t offset, size_t *bytesWritten);
 
         virtual bool waitForCompletion();
-    
+
     private:
         OsxAsyncFile*       file;
         bool                writing;
@@ -1696,7 +1696,7 @@ public:
     };
 
     virtual AsyncFile::Writer* getWriter();
-    
+
     class Reader : public AsyncFile::Reader
     {
     public:
@@ -1707,7 +1707,7 @@ public:
         virtual bool beginRead(void* buffer, size_t length, size_t offset, size_t *bytesRead);
 
         virtual bool waitForCompletion();
-    
+
     private:
         OsxAsyncFile*       file;
         bool                reading;
@@ -1887,7 +1887,7 @@ FileMapper::createMapping(size_t offset, size_t amountToMap, void** o_token)
     //_ASSERT(mapRequestSize % pagesize == 0);
     if (mapRequestSize + offset >= fileSize) {
         mapRequestSize = 0; // Says to just map the whole thing.
-    } 
+    }
 
     char* mappedBase = (char *) mmap(NULL, amountToMap + beginRounding, PROT_READ, MAP_SHARED, fd, offset - beginRounding);
     if (mappedBase == MAP_FAILED) {
@@ -1986,7 +1986,7 @@ bool createPipe(const char *fullyQualifiedPipeName)
 	return true;
 }
 
-FILE *connectPipe(char *fullyQualifiedPipeName, bool forInput) 
+FILE *connectPipe(char *fullyQualifiedPipeName, bool forInput)
 {
 	FILE *pipeFile = fopen(fullyQualifiedPipeName, forInput ? "r" : "w");
 	if (NULL == pipeFile) {
@@ -2042,7 +2042,7 @@ bool connectNamedPipes(NamedPipe *pipe)
 	    //
 	    // Release any exclusive lock on the toServer pipe that may have been left by a now-dead client
 	    //
-	    flock lock;
+	    struct flock lock;
 	    lock.l_type = F_UNLCK;
 	    lock.l_whence = SEEK_SET;
 	    lock.l_start = 0;
@@ -2101,7 +2101,7 @@ NamedPipe *OpenNamedPipe(const char *pipeName, bool serverSide)
 	    //
 	    // Take an exclusive lock on the toServer pipe so that only one client is sending at a time.
 	    //
-	    flock lock;
+	    struct flock lock;
 	    lock.l_type = F_WRLCK;
 	    lock.l_whence = SEEK_SET;
 	    lock.l_start = 0;
