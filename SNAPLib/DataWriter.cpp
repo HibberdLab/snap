@@ -82,7 +82,7 @@ public:
     virtual bool getBatch(int relative, char** o_buffer, size_t* o_size, size_t* o_used, size_t* o_offset, size_t* o_logicalUsed = 0, size_t* o_logicalOffset = NULL);
 
     virtual bool nextBatch();
-    
+
     virtual void close();
 
 private:
@@ -258,7 +258,7 @@ FileEncoder::setEncodedBatchSize(
 
 AsyncDataWriter::AsyncDataWriter(
     AsyncFile* i_file,
-    AsyncDataWriterSupplier* i_supplier, 
+    AsyncDataWriterSupplier* i_supplier,
     int i_count,
     size_t i_bufferSize,
     Filter* i_filter,
@@ -296,7 +296,7 @@ AsyncDataWriter::AsyncDataWriter(
         encoder->initialize(this);
     }
 }
-    
+
     bool
 AsyncDataWriter::getBuffer(
     char** o_buffer,
@@ -315,7 +315,7 @@ AsyncDataWriter::advance(
     _ASSERT((size_t)bytes <= bufferSize - batches[current].used);
     char* data = batches[current].buffer + batches[current].used;
     size_t batchOffset = batches[current].used;
-    batches[current].used = min(bufferSize, batchOffset + bytes);
+    batches[current].used = min<long long unsigned int>(bufferSize, batchOffset + bytes);
     if (filter != NULL) {
         //_int64 start = timeInNanos();
         filter->onAdvance(this, batchOffset, data, bytes, location);
@@ -527,7 +527,7 @@ public:
 
     virtual ~ComposeFilter()
     { delete a; delete b; }
-    
+
 	virtual void inHeader(bool flag)
 	{
 		a->inHeader(flag);
@@ -560,7 +560,7 @@ public:
 
     virtual ~ComposeFilterSupplier()
     { delete a; delete b; }
-    
+
     virtual DataWriter::Filter* getFilter()
     { return new ComposeFilter(a->getFilter(), b->getFilter()); }
 
@@ -569,7 +569,7 @@ public:
         a->onClosing(supplier);
         b->onClosing(supplier);
     }
-    
+
     virtual void onClosed(DataWriterSupplier* supplier)
     {
         a->onClosed(supplier);
@@ -617,7 +617,7 @@ StdoutAsyncFile::StdoutAsyncFile()
     PreventEventWaitersFromProceeding(&unexaminedElementsOnQueue);
     PreventEventWaitersFromProceeding(&elementsCompleted);
     CreateSingleWaiterObject(&consumerThreadDone);
-    
+
 
     closing = false;
 
@@ -691,14 +691,14 @@ StdoutAsyncFileWriter::waitForCompletion()
     return true;
 }
 
-StdoutAsyncFile::~StdoutAsyncFile() 
+StdoutAsyncFile::~StdoutAsyncFile()
 {
     DestroyExclusiveLock(&lock);
     DestroyEventObject(&unexaminedElementsOnQueue);
     DestroyEventObject(&elementsCompleted);
 }
 
-    bool 
+    bool
 StdoutAsyncFile::close()
 {
     AcquireExclusiveLock(&lock);
@@ -711,13 +711,13 @@ StdoutAsyncFile::close()
     return true;
 }
 
-    AsyncFile::Writer* 
+    AsyncFile::Writer*
 StdoutAsyncFile::getWriter()
 {
     return new StdoutAsyncFileWriter(this);
 }
-    
-    AsyncFile::Reader* 
+
+    AsyncFile::Reader*
 StdoutAsyncFile::getReader()
 {
     WriteErrorMessage("StdoutAsyncFile::getReader() called.\n");
@@ -734,7 +734,7 @@ StdoutAsyncFile::ConsumerThreadMain(void *param)
     SignalSingleWaiterObject(doneObject);
 }
 
-    void 
+    void
 StdoutAsyncFile::beginWrite(void *buffer, size_t length, size_t offset, size_t *o_bytesWritten)
 {
     if (0 == length) {
@@ -774,7 +774,7 @@ StdoutAsyncFile::beginWrite(void *buffer, size_t length, size_t offset, size_t *
     }
     ReleaseExclusiveLock(&lock);
 }
-    void 
+    void
 StdoutAsyncFile::waitForCompletion(size_t offset)
 {
     AcquireExclusiveLock(&lock);
@@ -828,7 +828,7 @@ StdoutAsyncFile::runConsumer()
             if (0 == bytesWritten) {
                 if (ENOMEM == errno && maxWriteSize > 1024) {
                     //
-                    // For whatever reason, sometimes trying to write too much to stdout generates an ENOMEM (though we have tons of memory).  
+                    // For whatever reason, sometimes trying to write too much to stdout generates an ENOMEM (though we have tons of memory).
                     // If we see that and we're not already at a small size, just reduce our max write size and try again.
                     //
                     maxWriteSize /= 2;
@@ -844,7 +844,7 @@ StdoutAsyncFile::runConsumer()
         if (NULL != element->o_bytesWritten) {
             *element->o_bytesWritten = totalBytesWritten;
         }
-        
+
         AcquireExclusiveLock(&lock);
         _ASSERT(writeElementQueue->next == element);
         element->dequeue();
