@@ -5,6 +5,7 @@
 #include "Compat.h"
 #include "Tables.h"
 #include "exit.h"
+#include "GenericFile.h"
 using std::max;
 using std::min;
 
@@ -25,7 +26,7 @@ inline double ratio(double a, double b=1)
 // Turn the value into a string with comma formatting (so 1,234,567 instead of 1234567).
 // Produces a null-terminated string.
 //
-extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t outputBufferSize);
+extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t outputBufferSize, size_t desiredWidth = 0);
 
 const int MAXLINE = 1024;
 
@@ -535,4 +536,11 @@ private:
 	EventObject _waiter;
 	ExclusiveLock _lock;
 };
+
+//
+// Version of fgets that dynamically (re-)allocates the buffer to be big enough to fit the whole line
+//
+char *reallocatingFgets(char **buffer, int *io_bufferSize, FILE *stream);
+char *reallocatingFgetsGenericFile(char **buffer, int *io_bufferSize, GenericFile *file);
+
 

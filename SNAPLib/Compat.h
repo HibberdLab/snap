@@ -2,7 +2,7 @@
 
 Module Name:
 
-    compat.h
+    Compat.h
 
 Abstract:
 
@@ -50,7 +50,7 @@ inline double exp10(double x) { return exp(x * LOG10); }
 const void* memmem(const void* data, const size_t dataLength, const void* pattern, const size_t patternLength);
 
 typedef CRITICAL_SECTION    UnderlyingExclusiveLock;
-typedef HANDLE SingleWaiterObject;      // This is an event in Windows.  It's just a synchronization object that you can wait for and set.
+typedef HANDLE SingleWaiterObject;      // This is an event in Windows.  It's just a synchronization object that you can wait for and set.  "Single" means only one thread can wait on it at a time.
 typedef HANDLE EventObject;
 
 #define PATH_SEP '\\'
@@ -69,7 +69,6 @@ typedef HANDLE EventObject;
 #define bit_rotate_left64(value, shift) _rotl64(value, shift)
 
 int getpagesize();
-
 #else   // _MSC_VER
 
 #include <pthread.h>
@@ -140,7 +139,7 @@ inline bool _BitScanForward64(unsigned long *result, _uint64 x) {
 class SingleWaiterObjectImpl;
 
 typedef pthread_mutex_t UnderlyingExclusiveLock;
-typedef SingleWaiterObjectImpl *SingleWaiterObject;
+typedef SingleWaiterObjectImpl *SingleWaiterObject; // "Single" means only one thread can wait on it at a time.
 
 class EventObjectImpl;
 typedef EventObjectImpl *EventObject;
@@ -213,7 +212,12 @@ public:
 #endif // _MSC_VER
 
 
-    ExclusiveLock() : initialized(false), holderThreadId(0), wholeProgramScope(false) {}
+    ExclusiveLock() : initialized(false),
+#ifdef _MSC_VER
+      holderThreadId(0),
+#endif
+      wholeProgramScope(false)
+    {}
     ~ExclusiveLock() {_ASSERT(!initialized || wholeProgramScope);}   // Must DestroyExclusiveLock first
 };
 
@@ -481,13 +485,6 @@ public:
     // MUST call unmap on each token out of createMapping, the destructor WILL NOT cleanup
     void unmap(void* token);
 
-#if 0
-    // prefetch was not being used, and implementation depended on single mapping per object
-    // ifdef'ed out when API was changed to allow multiple mappings (to reduce FD usage)
-    // can resurrect prefetch if we need it...
-    void prefetch(size_t currentRead);
-#endif
-
 private:
     bool        initialized;
     const char* fileName;
@@ -499,14 +496,6 @@ private:
     HANDLE      hFile;
     HANDLE      hMapping;
 
-#if 0
-    HANDLE      hFilePrefetch;
-    OVERLAPPED  lap[1];     // for the prefetch read
-    void        *prefetchBuffer;
-    static const int prefetchBufferSize = 16 * 1024 * 1024;
-    bool        isPrefetchOutstanding;
-    size_t      lastPrefetch;
-#endif
     _int64 millisSpentInReadFile;
     _int64 countOfImmediateCompletions;
     _int64 countOfDelayedCompletions;
@@ -524,3 +513,9 @@ private:
 // Call to keep the OS from putting the machine asleep
 //
 void PreventMachineHibernationWhileThisThreadIsAlive();
+
+//
+// Reduce our scheduling priority to be nicer to other jobs.
+//
+void SetToLowSchedulingPriority();
+

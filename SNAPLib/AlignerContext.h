@@ -13,7 +13,7 @@ Authors:
     Ravi Pandya, May, 2012
 
 Environment:
-`
+
     User mode service.
 
 Revision History:
@@ -57,8 +57,6 @@ public:
 
     void finishThread(AlignerContext* common);
 
-    void printStatsHeader();
-    
     void printStats();
     
     void beginIteration();
@@ -116,8 +114,10 @@ public:
     bool                                 noUkkonen;
     bool                                 noOrderedEvaluation;
 	bool								 noTruncation;
+    bool                                 ignoreAlignmentAdjustmentForOm;
     int                                  maxSecondaryAlignmentAdditionalEditDistance;
 	int									 maxSecondaryAlignments;
+    int                                  maxSecondaryAlignmentsPerContig;
 	unsigned							 minReadLength;
 
 
@@ -154,6 +154,10 @@ public:
 	virtual bool runIterationThread(PairedReadSupplier* supplier, AlignerContext* threadContext) { return false; }
 	
 	virtual bool runIterationThread(ReadSupplier* supplier, AlignerContext* threadContext) { return false; }
+
+    virtual void writeRead(Read* read, SingleAlignmentResult* result) {}
+
+    virtual void writePair(Read* read0, Read* read1, PairedAlignmentResult* result) {}
 
     virtual void finishThread() {}
 

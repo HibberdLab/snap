@@ -66,6 +66,7 @@ AlignerOptions::AlignerOptions(
     ignoreSecondaryAlignments(true),
     maxSecondaryAlignmentAdditionalEditDistance(-1),
 	maxSecondaryAlignments(0x7fffffff),
+    maxSecondaryAlignmentsPerContig(-1),    // -1 means don't limit
     preserveClipping(false),
     expansionFactor(1.0),
     noUkkonen(false),
@@ -74,7 +75,14 @@ AlignerOptions::AlignerOptions(
 	minReadLength(DEFAULT_MIN_READ_LENGTH),
     maxDistFraction(0.0),
 	mapIndex(false),
-	prefetchIndex(false)
+	prefetchIndex(false),
+    writeBufferSize(16 * 1024 * 1024),
+    dropIndexBeforeSort(false),
+    killIfTooSlow(false),
+    sortIntermediateDirectory(NULL),
+    profile(false),
+    ignoreAlignmentAdjustmentsForOm(true),
+    emitInternalScore(false)
 {
     if (forPairedEnd) {
         maxDist                 = 15;
@@ -100,83 +108,114 @@ AlignerOptions::usage()
     void
 AlignerOptions::usageMessage()
 {
-	WriteErrorMessage(
-		"Usage: \n%s\n"
-		"Options:\n"
-		"  -o   filename  output alignments to filename in SAM or BAM format, depending on the file extension or\n"
-		"       explicit type specifier (see below)\n"
-		"  -d   maximum edit distance allowed per read or pair (default: %d)\n"
-		"  -n   number of seeds to use per read\n"
-		"  -sc  Seed coverage (i.e., readSize/seedSize).  Floating point.  Exclusive with -n.  (default uses -n)\n"
-		"  -h   maximum hits to consider per seed (default: %d)\n"
-		"  -ms  minimum seed matches per location (default: %d)\n"
-		"  -t   number of threads (default is one per core)\n"
-		"  -b   bind each thread to its processor (this is the default)\n"
-		" --b   Don't bind each thread to its processor (note the double dash)\n"
-		"  -P   disables cache prefetching in the genome; may be helpful for machines\n"
-		"       with small caches or lots of cores/cache\n"
-		"  -so  sort output file by alignment location\n"
-		"  -sm  memory to use for sorting in Gb\n"
-		"  -x   explore some hits of overly popular seeds (useful for filtering)\n"
-		"  -f   stop on first match within edit distance limit (filtering mode)\n"
-		"  -F   filter output (a=aligned only, s=single hit only (MAPQ >= %d), u=unaligned only, l=long enough to align (see -mrl))\n"
-		"  -S   suppress additional processing (sorted BAM output only)\n"
-		"       i=index, d=duplicate marking\n"
+    WriteErrorMessage(
+        "Usage: \n%s\n"
+        "Options:\n"
+        "  -o   filename  output alignments to filename in SAM or BAM format, depending on the file extension or\n"
+        "       explicit type specifier (see below).  Use a dash with an explicit type specifier to write to\n"
+        "       stdout, so for example -o -sam - would write SAM output to stdout\n"
+        "  -d   maximum edit distance allowed per read or pair (default: %d)\n"
+        "  -n   number of seeds to use per read\n"
+        "  -sc  Seed coverage (i.e., readSize/seedSize).  Floating point.  Exclusive with -n.  (default uses -n)\n"
+        "  -h   maximum hits to consider per seed (default: %d)\n"
+        "  -ms  minimum seed matches per location (default: %d)\n"
+        "  -t   number of threads (default is one per core)\n"
+        "  -b   bind each thread to its processor (this is the default)\n"
+        " --b   Don't bind each thread to its processor (note the double dash)\n"
+        "  -P   disables cache prefetching in the genome; may be helpful for machines\n"
+        "       with small caches or lots of cores/cache\n"
+        "  -so  sort output file by alignment location\n"
+        "  -sm  memory to use for sorting in Gb\n"
+        "  -x   explore some hits of overly popular seeds (useful for filtering)\n"
+        "  -f   stop on first match within edit distance limit (filtering mode)\n"
+        "  -F   filter output (a=aligned only, s=single hit only (MAPQ >= %d), u=unaligned only, l=long enough to align (see -mrl))\n"
+        "  -E   an alternate (and fully general) way to specify filter options.  Emit only these types s = single hit (MAPQ >= %d), m = multiple hit (MAPQ < %d),\n"
+        "       x = not long enough to align, u = unaligned, b = filter must apply to both ends of a paired-end read.  Combine the letters after\n"
+        "       -E, so for example -E smu will emit all reads that aren't too short/have too many Ns (because it leaves off l).  -E smx is the same\n"
+        "       as -F a, -E ux is the same as -F u, and so forth.\n"
+        "       When filtering in paired-end mode (either with -F or -E) unless you specify the b flag a read will be emitted if it's mate pair passes the filter\n"
+        "       Even if the read itself does not.  If you specify b mode, then a read will be emitted only if it and its partner both pass the filter.\n"
+        "  -S   suppress additional processing (sorted BAM output only)\n"
+        "       i=index, d=duplicate marking\n"
 #if     USE_DEVTEAM_OPTIONS
-		"  -I   ignore IDs that don't match in the paired-end aligner\n"
+        "  -I   ignore IDs that don't match in the paired-end aligner\n"
 #ifdef  _MSC_VER    // Only need this on Windows, since memory allocation is fast on Linux
-		"  -B   Insert barrier after per-thread memory allocation to improve timing accuracy\n"
+        "  -B   Insert barrier after per-thread memory allocation to improve timing accuracy\n"
 #endif  // _MSC_VER
 #endif  // USE_DEVTEAM_OPTIONS
-		"  -Cxx must be followed by two + or - symbols saying whether to clip low-quality\n"
-		"       bases from front and back of read respectively; default: back only (-C-+)\n"
-		"  -M   indicates that CIGAR strings in the generated SAM file should use M (alignment\n"
-		"       match) rather than = and X (sequence (mis-)match).  This is the default\n"
-		"  -=   use the new style CIGAR strings with = and X rather than M.  The opposite of -M\n"
-		"  -G   specify a gap penalty to use when generating CIGAR strings\n"
-		"  -pf  specify the name of a file to contain the run speed\n"
-		"  --hp Indicates not to use huge pages (this may speed up index load and slow down alignment)  This is the default\n"
-		"  -hp  Indicates to use huge pages (this may speed up alignment and slow down index load).\n"
-		"  -D   Specifies the extra search depth (the edit distance beyond the best hit that SNAP uses to compute MAPQ).  Default 2\n"
-		"  -rg  Specify the default read group if it is not specified in the input file\n"
-		"  -R   Specify the entire read group line for the SAM/BAM output.  This must include an ID tag.  If it doesn't start with\n"
-		"       '@RG' SNAP will add that.  Specify tabs by \\t.  Two backslashes will generate a single backslash.\n"
-		"        backslash followed by anything else is illegal.  So, '-R @RG\\tID:foo\\tDS:my data' would generate reads\n"
-		"        with defualt tag foo, and an @RG line that also included the DS:my data field.\n"
-		"  -sa  Include reads from SAM or BAM files with the secondary (0x100) or supplementary (0x800) flag set; default is to drop them.\n"
-		"  -om  Output multiple alignments.  Takes as a parameter the maximum extra edit distance relative to the best alignment\n"
-		"       to allow for secondary alignments\n"
-		" -omax Limit the number of alignments per read generated by -om.\n"
-		"  -pc  Preserve the soft clipping for reads coming from SAM or BAM files\n"
-		"  -xf  Increase expansion factor for BAM and GZ files (default %.1f)\n"
-		"  -hdp Use Hadoop-style prefixes (reporter:status:...) on error messages, and emit hadoop-style progress messages\n"
-		"  -mrl Specify the minimum read length to align, reads shorter than this (after clipping) stay unaligned.  This should be\n"
-		"       a good bit bigger than the seed length or you might get some questionable alignments.  Default %d\n"
-		"  -map Use file mapping to load the index rather than reading it.  This might speed up index loading in cases\n"
-		"       where SNAP is run repatedly on the same index, and the index is larger than half of the memory size\n"
-		"       of the machine.  On some operating systems, loading an index with -map is much slower than without if the\n"
-		"       index is not in memory.  You might consider adding -pre to prefetch the index into system cache when loading\n"
-		"       with -map when you don't expect the index to be in cache.\n"
-		"  -pre Prefetch the index into system cache.  This is only meaningful with -map, and only helps if the index is not\n"
-		"       already in memory and your operating system is slow at reading mapped files (i.e., some versions of Linux,\n"
-		"       but not Windows).\n"
+        "  -Cxx must be followed by two + or - symbols saying whether to clip low-quality\n"
+        "       bases from front and back of read respectively; default: back only (-C-+)\n"
+        "  -M   indicates that CIGAR strings in the generated SAM file should use M (alignment\n"
+        "       match) rather than = and X (sequence (mis-)match).  This is the default\n"
+        "  -=   use the new style CIGAR strings with = and X rather than M.  The opposite of -M\n"
+        "  -G   specify a gap penalty to use when generating CIGAR strings\n"
+        "  -pf  specify the name of a file to contain the run speed\n"
+        "  --hp Indicates not to use huge pages (this may speed up index load and slow down alignment)  This is the default\n"
+        "  -hp  Indicates to use huge pages (this may speed up alignment and slow down index load).\n"
+        "  -D   Specifies the extra search depth (the edit distance beyond the best hit that SNAP uses to compute MAPQ).  Default 2\n"
+        "  -rg  Specify the default read group if it is not specified in the input file\n"
+        "  -R   Specify the entire read group line for the SAM/BAM output.  This must include an ID tag.  If it doesn't start with\n"
+        "       '@RG' SNAP will add that.  Specify tabs by \\t.  Two backslashes will generate a single backslash.\n"
+        "       backslash followed by anything else is illegal.  So, '-R @RG\\tID:foo\\tDS:my data' would generate reads\n"
+        "       with defualt tag foo, and an @RG line that also included the DS:my data field.\n"
+        "  -sa  Include reads from SAM or BAM files with the secondary (0x100) or supplementary (0x800) flag set; default is to drop them.\n"
+        "  -om  Output multiple alignments.  Takes as a parameter the maximum extra edit distance relative to the best alignment\n"
+        "       to allow for secondary alignments\n"
+        " -omax Limit the number of alignments per read generated by -om.  This means that if -om would generate more\n"
+        "       than -omax secondary alignments, SNAP will write out only the best -omax of them, where 'best' means\n"
+        "       'with the lowest edit distance'.  Ties are broken arbitrarily.\n"
+        "  -mpc Limit the number of alignments generated by -om to this many per contig (chromosome/FASTA entry);\n"
+        "       'mpc' means 'max per contig; default unlimited.  This filter is applied prior to -omax.  The primary alignment\n"
+        "       is counted.\n"
+        "  -pc  Preserve the soft clipping for reads coming from SAM or BAM files\n"
+        "  -xf  Increase expansion factor for BAM and GZ files (default %.1f)\n"
+        "  -hdp Use Hadoop-style prefixes (reporter:status:...) on error messages, and emit hadoop-style progress messages\n"
+        "  -mrl Specify the minimum read length to align, reads shorter than this (after clipping) stay unaligned.  This should be\n"
+        "       a good bit bigger than the seed length or you might get some questionable alignments.  Default %d\n"
+        "  -map Use file mapping to load the index rather than reading it.  This might speed up index loading in cases\n"
+        "       where SNAP is run repatedly on the same index, and the index is larger than half of the memory size\n"
+        "       of the machine.  On some operating systems, loading an index with -map is much slower than without if the\n"
+        "       index is not in memory.  You might consider adding -pre to prefetch the index into system cache when loading\n"
+        "       with -map when you don't expect the index to be in cache.\n"
+        "  -pre Prefetch the index into system cache.  This is only meaningful with -map, and only helps if the index is not\n"
+        "       already in memory and your operating system is slow at reading mapped files (i.e., some versions of Linux,\n"
+        "       but not Windows).\n"
+        "  -lp  Run SNAP at low scheduling priority (Only implemented on Windows)\n"
 #ifdef LONG_READS
         "  -dp  Edit distance as a percentage of read length (single only, overrides -d)\n"
 #endif
-		"  -nu  No Ukkonen: don't reduce edit distance search based on prior candidates. This option is purely for\n"
-		"       evalutating the performance effect of using Ukkonen's algorithm rather than Smith-Waterman, and specifying\n"
-		"       it will slow down execution without improving the alignments.\n"
-		"  -no  No Ordering: don't order the evalutation of reads so as to select more likely candidates first.  This option\n"
-		"       is purely for evaluating the performance effect of the read evaluation order, and specifying it will slow\n"
-		"       down execution without improving alignments.\n"
-		"  -nt  Don't truncate searches based on missed seed hits.  This option is purely for evaluating the performance effect\n"
-		"       of candidate truncation, and specifying it will slow down execution without improving alignments.\n"
+        "  -nu  No Ukkonen: don't reduce edit distance search based on prior candidates. This option is purely for\n"
+        "       evaluating the performance effect of using Ukkonen's algorithm rather than Smith-Waterman, and specifying\n"
+        "       it will slow down execution without improving the alignments.\n"
+        "  -no  No Ordering: don't order the evalutation of reads so as to select more likely candidates first.  This option\n"
+        "       is purely for evaluating the performance effect of the read evaluation order, and specifying it will slow\n"
+        "       down execution without improving alignments.\n"
+        "  -nt  Don't truncate searches based on missed seed hits.  This option is purely for evaluating the performance effect\n"
+        "       of candidate truncation, and specifying it will slow down execution without improving alignments.\n"
+        " -wbs  Write buffer size in megabytes.  Don't specify this unless you've gotten an error message saying to make it bigger.  Default 16.\n"
+        "  -di  Drop the index after aligning and before sorting.  This frees up memory for the sort at the expense of not having the index loaded for your next run.\n"
+        " -kts  Kill if too slow.  Monitor our progress and kill ourself if we're not moving fast enough.  This is intended for use on machines\n"
+        "       with limited memory, where some alignment tasks will push SNAP into paging, and take disproportinaltely long.  This allows the script\n"
+        "       to move on to the next alignment.  Only works when generating output, and not during the sort phase.  If you're running out of memory\n"
+        "       sorting, try using -di.\n"
+        " -sid  Specifies the sort intermediate directory.  When SNAP is sorting, it aligns the reads in the order in which they come in, and writes\n"
+        "       the aligned reads in batches to a temporary file.  When the aligning is done, it does a merge sort from the temporary file into the\n"
+        "       final output file.  By default, the intermediate file is in the same directory as the output file, but for performance or space\n"
+        "       reasons, you might want to put it elsewhere.  If so, use this option.\n"
+        " -pro  Profile alignment to give you an idea of how much time is spent aligning and how much waiting for IO\n"
+        "  -ae  Apply the end-of-contig soft clipping before the -om processing rather than after it.  A read that's soft clipped because of hanging off one end or the other\n"
+        "       of a contig does not have a penalty in its NM tag, but it does in SNAP's internal scoring.  This flag says to use the NM value for -om processing\n"
+        "       rather than SNAP's internal score.\n"
+        "  -is  Write SNAP's internal score for an alignment into the output.  The value following -is specifies the tag to use, and must be a two letter\n"
+        "       value starting with X, Y or Z.  So, -is ZQ will cause SNAP to write ZQ:i:3 on a read with internal score 3.  Generally, the internal scores\n"
+        "       are the same as the NM values, except that they contain penalties for soft clipping reads that hang over the end of contigs (but not for\n"
+        "       soft clipping that's due to # quality scores or that was present in the input SAM/BAM file and retained due to -pc)\n"
 		,
             commandLine,
             maxDist,
             maxHits,
 			minWeightToCheck,
-			MAPQ_LIMIT_FOR_SINGLE_HIT,
+            MAPQ_LIMIT_FOR_SINGLE_HIT, MAPQ_LIMIT_FOR_SINGLE_HIT, MAPQ_LIMIT_FOR_SINGLE_HIT,
             expansionFactor,
 			DEFAULT_MIN_READ_LENGTH);
 
@@ -190,7 +229,7 @@ AlignerOptions::usageMessage()
                 "alignment, followed by a comma (separated by a space from the other parameters) followed by the\n"
                 "parameters for the next alignment (including single or paired).  You may have as many of these\n"
                 "as you please.  If two consecutive alignments use the same index, it will not be reloaded.\n"
-                "So, for example, you could do 'snap single hg19-20 foo.fq -o foo.sam , paired hg19-20 end1.fq end2.fq -o paired.sam'\n"
+                "So, for example, you could do 'snap-aligner single hg19-20 foo.fq -o foo.sam , paired hg19-20 end1.fq end2.fq -o paired.sam'\n"
                 "and it would not reload the index between the single and paired alignments.\n",
                 "SNAP doesn't parse the options for later runs until the earlier ones have completed, so if you make\n"
                 "an error in one, it may take a while for you to notice.  So, be careful (or check back shortly after\n"
@@ -198,7 +237,7 @@ AlignerOptions::usageMessage()
 
     WriteErrorMessage("When specifying an input or output file, you can simply list the filename, in which case\n"
                       "SNAP will infer the type of the file from the file extension (.sam or .bam for example),\n"
-                      "or you can explicitly specify the file type by preceeding the filename with one of the\n"
+                      "or you can explicitly specify the file type by preceding the filename with one of the\n"
                       " following type specifiers (which are case sensitive):\n"
                       "    -fastq\n"
                       "    -compressedFastq\n"
@@ -213,6 +252,10 @@ AlignerOptions::usageMessage()
                       "doesn't recoginize the file extension.\n"
                       "In order to use a file name that begins with a '-' and not have SNAP treat it as a switch, you must\n"
                       "explicitly specify the type.  But really, that's just confusing and you shouldn't do it.\n"
+                      "Input and output may also be from/to stdin/stdout. To do that, use a - for the input or output file\n"
+                      "name and give an explicit type specifier.  So, for example, \n"
+                      "snap-aligner single myIndex -fastq - -o -sam -\n"
+                      "would read FASTQ from stdin and write SAM to stdout.\n"
     );
 }
 
@@ -300,6 +343,9 @@ AlignerOptions::parse(
     } else if (strcmp(argv[n], "-P") == 0) {
         doAlignerPrefetch = false;
         return true;
+    } else if (strcmp(argv[n], "-kts") == 0) {
+        killIfTooSlow = true;
+        return true;
 	} else if (strcmp(argv[n], "-b") == 0) {
 		bindToProcessors = true;
 		return true;
@@ -315,8 +361,10 @@ AlignerOptions::parse(
 	} else if (strcmp(argv[n], "-pre") == 0) {
 		prefetchIndex = true;
 		return true;
-	}
-	else if (strcmp(argv[n], "-S") == 0) {
+    } else if (strcmp(argv[n], "-ae") == 0) {
+        ignoreAlignmentAdjustmentsForOm = false;
+        return true;
+    } else if (strcmp(argv[n], "-S") == 0) {
         if (n + 1 < argc) {
             n++;
             for (const char* p = argv[n]; *p; p++) {
@@ -342,30 +390,39 @@ AlignerOptions::parse(
             n++;
             return true;
         }
+    } else if (strcmp(argv[n], "-is") == 0) {
+        if (n + 1 >= argc || strlen(argv[n + 1]) != 2 || argv[n + 1][0] < 'X' || argv[n + 1][0] > 'Z' || argv[n + 1][1] < 'A' || argv[n + 1][1] > 'Z') {
+            WriteErrorMessage("-is switch must be followed by two letter tag that consists of X, Y, or Z and a capital letter.\n");
+            return false;
+        }
+        emitInternalScore = true;
+        strcpy(internalScoreTag, argv[n + 1]);
+        n++;
+        return true;
     } else if (strcmp(argv[n], "-F") == 0) {
         if (n + 1 < argc) {
             n++;
             if (strcmp(argv[n], "a") == 0) {
 				if (0 != filterFlags) {
-					WriteErrorMessage("Specified -F %s after a previous -F option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
+					WriteErrorMessage("Specified -F %s after a previous -F or -E option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
 					return false;
 				}
                 filterFlags = FilterSingleHit | FilterMultipleHits | FilterTooShort;
             } else if (strcmp(argv[n], "s") == 0) {
 				if (0 != filterFlags) {
-					WriteErrorMessage("Specified -F %s after a previous -F option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
+					WriteErrorMessage("Specified -F %s after a previous -F or -E option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
 					return false;
 				}
 				filterFlags = FilterSingleHit | FilterTooShort;
 			} else if (strcmp(argv[n], "u") == 0) {
 				if (0 != filterFlags) {
-					WriteErrorMessage("Specified -F %s after a previous -F option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
+					WriteErrorMessage("Specified -F %s after a previous -F or -E  option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
 					return false;
 				}
 				filterFlags = FilterUnaligned | FilterTooShort;
 			} else if (strcmp(argv[n], "l") == 0) {
 				if (0 != filterFlags) {
-					WriteErrorMessage("Specified -F %s after a previous -F option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
+					WriteErrorMessage("Specified -F %s after a previous -F or -E  option.  Choose one (or put -F b after -F %s)\n", argv[n], argv[n]);
 					return false;
 				}
 				filterFlags = FilterSingleHit | FilterMultipleHits | FilterUnaligned;
@@ -375,6 +432,25 @@ AlignerOptions::parse(
 				WriteErrorMessage("Unknown option type after -F: %s\n", argv[n]);
 				return false;
 			}
+            return true;
+        }
+    } else if (strcmp(argv[n], "-E") == 0) {
+        if (n + 1 < argc) {
+            if (0 != filterFlags) {
+                WriteErrorMessage("You can have only one -F and/or -E switch (excepting -F b)\n");
+                return false;
+            }
+            n++;
+            for (int whichChar = 0; whichChar < strlen(argv[n]); whichChar++) {
+                switch (argv[n][whichChar]) {
+                case 's':   filterFlags |= FilterSingleHit; break;
+                case 'm':   filterFlags |= FilterMultipleHits; break;
+                case 'x':   filterFlags |= FilterTooShort; break;
+                case 'u':   filterFlags |= FilterUnaligned; break;
+                case 'b':   filterFlags |= FilterBothMatesMatch; break;
+                default:    WriteErrorMessage("Unrecognized filter type after -E '%c'; must be one of smxub\n", argv[n][whichChar]); return false;
+                }
+            }
             return true;
         }
     } else if (strcmp(argv[n], "-x") == 0) {
@@ -409,7 +485,7 @@ AlignerOptions::parse(
 		}
 		//
 		// Check that the parameter is actually numeric.  This is to avoid having someone do "-om -anotherSwitch" and
-		// having the additional switche silently consumed here.
+		// having the additional switch silently consumed here.
 		//
 		if (argv[n + 1][0] < '0' || argv[n + 1][0] > '9') {
 			WriteErrorMessage("-om requires a numerical parameter.\n");
@@ -420,25 +496,76 @@ AlignerOptions::parse(
 		n++;
 
 		return true;
-	} else if (strcmp(argv[n], "-omax") == 0) {
-		if (n + 1 >= argc) {
-			WriteErrorMessage("-omax requires an additional value\n");
-			return false;
-		}
-		//
-		// Check that the parameter is actually numeric.  This is to avoid having someone do "-omax -anotherSwitch" and
-		// having the additional switche silently consumed here.
-		//
-		if (argv[n + 1][0] < '0' || argv[n + 1][0] > '9') {
-			WriteErrorMessage("-omax requires a numerical parameter.\n");
-			return false;
-		}
-		maxSecondaryAlignments = atoi(argv[n + 1]);
+    } else if (strcmp(argv[n], "-omax") == 0) {
+        if (n + 1 >= argc) {
+            WriteErrorMessage("-omax requires an additional value\n");
+            return false;
+        }
+ 
+        maxSecondaryAlignments = atoi(argv[n + 1]);
 
-		n++;
+        if (maxSecondaryAlignments <= 0) {
+            WriteErrorMessage("-omax must be strictly positive\n");
+        }
 
-		return true;
-	} else if (strcmp(argv[n], "-xf") == 0) {
+        n++;
+
+        return true;
+    } else if (strcmp(argv[n], "-sid") == 0) {
+        if (n + 1 >= argc) {
+            WriteErrorMessage("-sid requires an additional value\n");
+            return false;
+        }
+
+        if (argv[n + 1][0] == '-') {
+            WriteErrorMessage("The directory name after -sid must not start with a dash (it's just too confusing when compared with a command line switch)\n");
+            return false;
+        }
+
+        sortIntermediateDirectory = argv[n + 1];
+        n++;
+        return true;
+    }
+    else if (strcmp(argv[n], "-mpc") == 0) {
+        if (n + 1 >= argc) {
+            WriteErrorMessage("-mpc requires an additional value\n");
+            return false;
+        }
+
+        maxSecondaryAlignmentsPerContig = atoi(argv[n + 1]);
+
+        if (maxSecondaryAlignmentsPerContig <= 0) {
+            WriteErrorMessage("-mpc must be strictly positive\n");
+            return false;
+        }
+
+        n++;
+
+        return true;
+    } else if (strcmp(argv[n], "-wbs") == 0) {
+        if (n + 1 >= argc) {
+            WriteErrorMessage("-wbs requires an additional value\n");
+            return false;
+        }
+        //
+        // Check that the parameter is actually numeric.  This is to avoid having someone do "-wbs -anotherSwitch" and
+        // having the additional switch silently consumed here.
+        //
+        if (argv[n + 1][0] < '0' || argv[n + 1][0] > '9') {
+            WriteErrorMessage("-wbs requires a numerical parameter.\n");
+            return false;
+        }
+        writeBufferSize = atoi(argv[n + 1]) * 1024 * 1024;
+
+        if (writeBufferSize <= 0) {
+            WriteErrorMessage("-wbs must be bigger than zero");
+            return false;
+        }
+
+        n++;
+
+        return true;
+    } else if (strcmp(argv[n], "-xf") == 0) {
         if (n + 1 < argc) {
             n++;
             expansionFactor = (float)atof(argv[n]);
@@ -447,7 +574,10 @@ AlignerOptions::parse(
 	} else if (strcmp(argv[n], "-pc") == 0) {
 		preserveClipping = true;
 		return true;
-	} else if (strcmp(argv[n], "-G") == 0) {
+    } else if (strcmp(argv[n], "-pro") == 0) {
+        profile = true;
+        return true;
+    } else if (strcmp(argv[n], "-G") == 0) {
         if (n + 1 < argc) {
             gapPenalty = atoi(argv[n+1]);
             if (gapPenalty < 1) {
@@ -632,6 +762,9 @@ AlignerOptions::parse(
 	} else if (strcmp(argv[n], "-hdp") == 0) {
         AlignerOptions::useHadoopErrorMessages = true;
         return true;    
+    } else if (strcmp(argv[n], "-lp") == 0) {
+        SetToLowSchedulingPriority();
+        return true;
     } else if (strcmp(argv[n], "-nu") == 0) {
         noUkkonen = true;
         return true;
@@ -641,7 +774,10 @@ AlignerOptions::parse(
 	} else if (strcmp(argv[n], "-nt") == 0) {
 		noTruncation = true;
 		return true;
-	} else if (strcmp(argv[n], "-D") == 0) {
+    } else if (strcmp(argv[n], "-di") == 0) {
+        dropIndexBeforeSort = true;
+        return true;
+    } else if (strcmp(argv[n], "-D") == 0) {
         if (n + 1 < argc) {
             extraSearchDepth = atoi(argv[n+1]);
             n++;
@@ -687,14 +823,20 @@ AlignerOptions::parse(
 AlignerOptions::passFilter(
     Read* read,
     AlignmentResult result,
-	bool tooShort)
+	bool tooShort,
+    bool secondaryAlignment)
 {
     if (filterFlags == 0) {
         return true;
     }
-	if (tooShort && (filterFlags & FilterTooShort) == 0) {
-		return false;
-	}
+    if (tooShort) {
+        return (filterFlags & FilterTooShort) != 0;
+    }
+
+    if (result == MultipleHits && secondaryAlignment && (filterFlags & FilterSingleHit)) { // Don't filter out secondary alignments for low MAPQ
+        return true;
+    }
+
     switch (result) {
     case NotFound:
     case UnknownAlignment:
@@ -904,7 +1046,7 @@ SNAPFile::generateFromCommandLine(const char **args, int nArgs, int *argsConsume
         }
     } else {
         if (snapFile->isStdio) {
-            WriteErrorMessage("Stdio IO always requires an explicit file type.  So, for example, do 'snap single index-directory -fastq -' to read FASTQ from stdin\n");
+            WriteErrorMessage("Stdio IO always requires an explicit file type.  So, for example, do 'snap-aligner single index-directory -fastq -' to read FASTQ from stdin\n");
         } else {
             WriteErrorMessage("Unknown file type for file name '%s', please specify file type with -fastq, -sam, -bam, etc.\n", snapFile->fileName);
         }

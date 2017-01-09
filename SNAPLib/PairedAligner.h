@@ -2,18 +2,18 @@
 
 Module Name:
 
-    SingleAligner.cpp
+    PairedAligner.h
 
 Abstract:
 
-    Functions for running the single end aligner sub-program.
+    Header for the paired end aligner scaffolding
 
 Authors:
 
     Matei Zaharia, February, 2012
 
 Environment:
-`
+
     User mode service.
 
 Revision History:
@@ -48,8 +48,6 @@ protected:
     virtual void runIterationThread();
 
     // for subclasses
-
-    virtual void writePair(Read* read0, Read* read1, PairedAlignmentResult* result, bool secondary, bool useful0, bool useful1);
 
     virtual void updateStats(PairedAlignerStats* stats, Read* read0, Read* read1, PairedAlignmentResult* result, bool useful0, bool useful1);
 

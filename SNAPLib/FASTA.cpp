@@ -27,6 +27,7 @@ Revision History:
 #include "FASTA.h"
 #include "Error.h"
 #include "exit.h"
+#include "Util.h"
 
 using namespace std;
 
@@ -58,15 +59,15 @@ ReadFASTAGenome(
         return NULL;
     }
 
-    const size_t lineBufferSize = 4096;
-    char lineBuffer[lineBufferSize];
-
+    int lineBufferSize = 0;
+    char *lineBuffer;
+ 
     //
     // Count the chromosomes
     //
     unsigned nChromosomes = 0;
 
-    while (NULL != fgets(lineBuffer,lineBufferSize,fastaFile)) {
+    while (NULL != reallocatingFgets(&lineBuffer,&lineBufferSize,fastaFile)) {
         if (lineBuffer[0] == '>') {
             nChromosomes++;
         }
@@ -81,10 +82,14 @@ ReadFASTAGenome(
     }
     paddingBuffer[chromosomePaddingSize] = '\0';
 
-    while (NULL != fgets(lineBuffer,lineBufferSize,fastaFile)) {
+    bool warningIssued = false;
+    bool inAContig = false;
+
+    while (NULL != reallocatingFgets(&lineBuffer, &lineBufferSize, fastaFile)) {
         if (lineBuffer[0] == '>') {
+            inAContig = true;
             //
-            // A new chromosome.  Add in the padding first.
+            // A new contig.  Add in the padding first.
             //
             genome->addData(paddingBuffer);
 
@@ -119,6 +124,11 @@ ReadFASTAGenome(
             }
             genome->startContig(lineBuffer+1);
         } else {
+            if (!inAContig) {
+                WriteErrorMessage("\nFASTA file doesn't beging with a contig name (i.e., the first line doesn't start with '>').\n");
+                soft_exit(1);
+            }
+
             //
             // Convert it to upper case and truncate the newline before adding it to the genome.
             //
@@ -144,8 +154,11 @@ ReadFASTAGenome(
                 }
 
                 if (!isValidGenomeCharacter[(unsigned char)lineBuffer[i]]) {
-                    WriteErrorMessage("\nFASTA file contained a character that's not a valid base (or N): '%c', full line '%s'\n", lineBuffer[i], lineBuffer);
-                    soft_exit(1);
+                    if (!warningIssued) {
+                        WriteErrorMessage("\nFASTA file contained a character that's not a valid base (or N): '%c', full line '%s'; \nconverting to 'N'.  This may happen again, but there will be no more warnings.\n", lineBuffer[i], lineBuffer);
+                        warningIssued = true;
+                    }
+                    lineBuffer[i] = 'N';
                 }
             }
             genome->addData(lineBuffer);
@@ -161,6 +174,7 @@ ReadFASTAGenome(
 
     fclose(fastaFile);
     delete [] paddingBuffer;
+    delete [] lineBuffer;
     return genome;
 }
 

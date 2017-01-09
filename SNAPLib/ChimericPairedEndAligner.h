@@ -37,40 +37,39 @@ public:
         unsigned            maxK,
         unsigned            maxSeedsFromCommandLine,
         double              seedCoverage,
-	unsigned            minWeightToCheck,
+	    unsigned            minWeightToCheck,
         bool                forceSpacing_,
         unsigned            extraSearchDepth,
         bool                noUkkonen,
         bool                noOrderedEvaluation,
 		bool				noTruncation,
+        bool                ignoreALignmentAdjustmentsForOm,
         PairedEndAligner    *underlyingPairedEndAligner_,
 		unsigned			minReadLength_,
+        int                 maxSecondaryAlignmentsPerContig,
         BigAllocator        *allocator);
     
     virtual ~ChimericPairedEndAligner();
     
-    static unsigned getMaxSingleEndSecondaryResults(unsigned maxSeedsToUse, double maxSeedCoverage, unsigned maxReadSize, unsigned maxHits, unsigned seedLength)
-    {
-        return BaseAligner::getMaxSecondaryResults(maxSeedsToUse, maxSeedCoverage, maxReadSize, maxHits, seedLength) * NUM_READS_PER_PAIR;
-    }
-
     static size_t getBigAllocatorReservation(GenomeIndex * index, unsigned maxReadSize, unsigned maxHits, unsigned seedLen, unsigned maxSeedsFromCommandLine, 
-                                             double seedCoverage, unsigned maxEditDistanceToConsider, unsigned maxExtraSearchDepth, unsigned maxCandidatePoolSize);
+                                             double seedCoverage, unsigned maxEditDistanceToConsider, unsigned maxExtraSearchDepth, unsigned maxCandidatePoolSize,
+                                             int maxSecondaryAlignmentsPerContig);
 
     void *operator new(size_t size, BigAllocator *allocator) {_ASSERT(size == sizeof(ChimericPairedEndAligner)); return allocator->allocate(size);}
     void operator delete(void *ptr, BigAllocator *allocator) {/* do nothing.  Memory gets cleaned up when the allocator is deleted.*/}
 
-    virtual void align(
+    virtual bool align(
         Read                  *read0,
         Read                  *read1,
         PairedAlignmentResult *result,
         int                    maxEditDistanceForSecondaryResults,
-        int                    secondaryResultBufferSize,
-        int                   *nSecondaryResults,
+        _int64                 secondaryResultBufferSize,
+        _int64                *nSecondaryResults,
         PairedAlignmentResult *secondaryResults,             // The caller passes in a buffer of secondaryResultBufferSize and it's filled in by AlignRead()
-        int                    singleSecondaryBufferSize,
-        int                   *nSingleEndSecondaryResultsForFirstRead,
-        int                   *nSingleEndSecondaryResultsForSecondRead,
+        _int64                 singleSecondaryBufferSize,
+        _int64                 maxSecondaryAlignmentsToReturn,
+        _int64                *nSingleEndSecondaryResultsForFirstRead,
+        _int64                *nSingleEndSecondaryResultsForSecondRead,
         SingleAlignmentResult *singleEndSecondaryResults     // Single-end secondary alignments for when the paired-end alignment didn't work properly
         );
 

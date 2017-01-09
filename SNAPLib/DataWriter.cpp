@@ -28,6 +28,37 @@ Environment:
 using std::min;
 using std::max;
 
+char *
+DataWriterSupplier::generateSortIntermediateFilePathName(AlignerOptions *options)
+{
+    const char * tempExtension = ".tmp";
+    char* tempFileName;
+    if (NULL != options->sortIntermediateDirectory) {
+        //
+        // Pathname is sortIntermediateDirectory + PATH_SEP + terminal component of outputFile.fileName + .tmp
+        //
+        const char *terminalComponent = strrchr(options->outputFile.fileName, PATH_SEP);
+        if (NULL == terminalComponent) {
+            terminalComponent = options->outputFile.fileName;
+        }
+        else {
+            terminalComponent++;    // Skips over the PATH_SEP
+        }
+
+        size_t len = strlen(options->sortIntermediateDirectory) + 1 + strlen(terminalComponent) + strlen(tempExtension) + 1;     // Last +1 for string terminating null
+        // todo: this is going to leak, but there's no easy way to free it, and it's small...
+        tempFileName = new char[len];
+        sprintf(tempFileName, "%s%c%s%s", options->sortIntermediateDirectory, PATH_SEP, terminalComponent, tempExtension);
+    } else {
+        size_t len = strlen(options->outputFile.fileName) + strlen(tempExtension) + 1;
+        // todo: this is going to leak, but there's no easy way to free it, and it's small...
+        tempFileName = new char[len];
+        sprintf(tempFileName, "%s%s", options->outputFile.fileName, tempExtension);
+    }
+
+    return tempFileName;
+}
+
 class AsyncDataWriterSupplier : public DataWriterSupplier
 {
 public:
@@ -315,7 +346,7 @@ AsyncDataWriter::advance(
     _ASSERT((size_t)bytes <= bufferSize - batches[current].used);
     char* data = batches[current].buffer + batches[current].used;
     size_t batchOffset = batches[current].used;
-    batches[current].used = min<long long unsigned int>(bufferSize, batchOffset + bytes);
+    batches[current].used = min<long long>(bufferSize, batchOffset + bytes);
     if (filter != NULL) {
         //_int64 start = timeInNanos();
         filter->onAdvance(this, batchOffset, data, bytes, location);
@@ -511,10 +542,12 @@ AsyncDataWriterSupplier::advance(
     DataWriterSupplier*
 DataWriterSupplier::create(
     const char* filename,
+    size_t bufferSize,
+    bool emitInternalScore,
+    char *internalScoreTag,
     DataWriter::FilterSupplier* filterSupplier,
     FileEncoder* encoder,
-    int count,
-    size_t bufferSize)
+    int count)
 {
     return new AsyncDataWriterSupplier(filename, filterSupplier, encoder, count, bufferSize);
 }

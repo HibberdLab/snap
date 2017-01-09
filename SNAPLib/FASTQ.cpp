@@ -62,7 +62,7 @@ FASTQReader::create(
     _int64 amountOfFileToProcess,
     const ReaderContext& context)
 {
-    DataReader* data = supplier->getDataReader(bufferCount, maxReadSizeInBytes, 0.0);
+    DataReader* data = supplier->getDataReader(bufferCount, maxReadSizeInBytes, 0.0, 0);
     FASTQReader* fastq = new FASTQReader(data, context);
     if (! fastq->init(fileName)) {
         WriteErrorMessage("Unable to initialize FASTQReader for file %s\n", fileName);
@@ -159,7 +159,7 @@ FASTQReader::skipPartialRecord(DataReader *data)
         char *thirdLineCandidate = secondLineCandidate;
         while (*thirdLineCandidate == 'A' || *thirdLineCandidate == 'C' || *thirdLineCandidate == 'T' || *thirdLineCandidate == 'G' ||
                 *thirdLineCandidate == 'N' || *thirdLineCandidate == 'a' || *thirdLineCandidate == 'c' || *thirdLineCandidate == 't' || 
-                *thirdLineCandidate == 'g') {
+                *thirdLineCandidate == 'g' || *thirdLineCandidate == 'n') {
             thirdLineCandidate++;
         }
 
@@ -223,7 +223,7 @@ FASTQReader::getNextRead(Read *readToUpdate)
     return true;
 }
 
-// static char LAST[100000]; static int LASTLEN = 0;
+//static char LAST[100000]; static int LASTLEN = 0;
 
     _int64
 FASTQReader::getReadFromBuffer(char *buffer, _int64 validBytes, Read *readToUpdate, const char *fileName, DataReader *data, const ReaderContext &context)
@@ -278,7 +278,7 @@ FASTQReader::getReadFromBuffer(char *buffer, _int64 validBytes, Read *readToUpda
     readToUpdate->setBatch(data->getBatch());
     readToUpdate->setReadGroup(context.defaultReadGroup);
 
-    // memcpy(LAST, buffer, scan - buffer); LASTLEN = scan - buffer;
+    //memcpy(LAST, buffer, scan - buffer); LASTLEN = scan - buffer;
 
     return scan - buffer;
 
@@ -307,9 +307,9 @@ FASTQReader::_init::_init()
 
     //
     // The second line is the read itself and must start with a base or an
-    // 'N' in either case.
+    // 'N' in either case.  A . is just a different way to encode an N.
     //
-    for (const char*p = "ACTGNURYKMSWBDHVNX"; *p; p++) {
+    for (const char*p = "ACTGNURYKMSWBDHVNX."; *p; p++) {
         isValidStartingCharacterForNextLine[0][*p] = true;
         isValidStartingCharacterForNextLine[0][tolower(*p)] = true;
     }
@@ -347,7 +347,7 @@ PairedInterleavedFASTQReader::PairedInterleavedFASTQReader(
 PairedInterleavedFASTQReader::create(DataSupplier* supplier, const char *fileName, int bufferCount, _int64 startingOffset, _int64 amountOfFileToProcess,
                                         const ReaderContext& context)
 {
-    DataReader* data = supplier->getDataReader(bufferCount, 2 * maxReadSizeInBytes, 0.0); // 2* because we read in pairs
+    DataReader* data = supplier->getDataReader(bufferCount, 2 * maxReadSizeInBytes, 0.0, 0); // 2* because we read in pairs
     PairedInterleavedFASTQReader* fastq = new PairedInterleavedFASTQReader(data, context);
     if (! fastq->init(fileName)) {
         WriteErrorMessage("Unable to initialize PairedInterleavedFASTQReader for file %s\n", fileName);
@@ -373,14 +373,17 @@ PairedInterleavedFASTQReader::getNextReadPair(Read *read0, Read *read1)
     //
 
     char* buffer;
-    _int64 validBytes;
-    if (! data->getData(&buffer, &validBytes)) {
+    _int64 validBytes, startBytes;
+    if (! data->getData(&buffer, &validBytes, &startBytes)) {
+      //fprintf(stderr, "!getData offset %lld\n", data->getFileOffset());
         data->nextBatch();
-        if (! data->getData(&buffer, &validBytes)) {
+        //fprintf(stderr, "FQ batch\n");
+        if (! data->getData(&buffer, &validBytes, &startBytes)) {
             return false;
         }
+      //fprintf(stderr, "nextBatch getData offset %lld\n", data->getFileOffset());
+      //fprintf(stderr, "FQ data %.10s, start ...%.10s, valid ...%.10s, %lld bytes\n", buffer, buffer+validBytes-10, buffer+startBytes-10, validBytes);
     }
-    
     _int64 bytesConsumed = FASTQReader::getReadFromBuffer(buffer, validBytes, read0, fileName, data, context);
     if (bytesConsumed == validBytes) {
         WriteErrorMessage("Input file seems to have an odd number of reads.  Ignoring the last one.");

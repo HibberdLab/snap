@@ -6,7 +6,7 @@ Module Name:
 
 Abstract:
 
-    SNAP genome aligner
+   Single-end aligner
 
 Authors:
 
@@ -56,6 +56,8 @@ BaseAligner::BaseAligner(
     bool            i_noUkkonen,
     bool            i_noOrderedEvaluation,
 	bool			i_noTruncation,
+    bool            i_ignoreAlignmentAdjustmentsForOm,
+    int             i_maxSecondaryAlignmentsPerContig,
     LandauVishkin<1>*i_landauVishkin,
     LandauVishkin<-1>*i_reverseLandauVishkin,
     AlignerStats   *i_stats,
@@ -65,7 +67,8 @@ BaseAligner::BaseAligner(
         maxSeedCoverage(i_maxSeedCoverage), readId(-1), extraSearchDepth(i_extraSearchDepth),
         explorePopularSeeds(false), stopOnFirstHit(false), stats(i_stats), 
         noUkkonen(i_noUkkonen), noOrderedEvaluation(i_noOrderedEvaluation), noTruncation(i_noTruncation),
-		minWeightToCheck(max(1u, i_minWeightToCheck))
+		minWeightToCheck(max(1u, i_minWeightToCheck)), maxSecondaryAlignmentsPerContig(i_maxSecondaryAlignmentsPerContig),
+        alignmentAdjuster(i_genomeIndex->getGenome()), ignoreAlignmentAdjustmentsForOm(i_ignoreAlignmentAdjustmentsForOm)
 /*++
 
 Routine Description:
@@ -86,6 +89,8 @@ Arguments:
     i_noUkkonen         - Don't use Ukkonen's algorithm (i.e., don't reduce the max edit distance depth as we score candidates)
     i_noOrderedEvaluation-Don't order evaluating the reads by the hit count in order to drive down the max edit distance more quickly
 	i_noTruncation       - Don't truncate searches based on count of disjoint seed misses
+    i_ignoreAlignmentAdjustmentsForOm - When a read score is adjusted because of soft clipping for being near the end of a contig, don't use the adjusted score when computing what to keep for -om
+    i_maxSecondaryAlignmentsPerContig - Maximum secondary alignments per contig; -1 means don't limit this
     i_landauVishkin     - an externally supplied LandauVishkin string edit distance object.  This is useful if we're expecting repeated computations and use the LV cache.
     i_reverseLandauVishkin - the same for the reverse direction.
     i_stats             - an object into which we report out statistics
@@ -190,12 +195,25 @@ Arguments:
         weightLists = (HashTableElement *)allocator->allocate(sizeof(HashTableElement) * numWeightLists);
         hashTableElementPool = (HashTableElement *)allocator->allocate(sizeof(HashTableElement) * hashTableElementPoolSize); // Allocte last, because it's biggest and usually unused.  This puts all of the commonly used stuff into one large page.
         hitCountByExtraSearchDepth = (unsigned *)allocator->allocate(sizeof(*hitCountByExtraSearchDepth) * extraSearchDepth);
+        if (maxSecondaryAlignmentsPerContig > 0) {
+            hitsPerContigCounts = (HitsPerContigCounts *)allocator->allocate(sizeof(*hitsPerContigCounts) * genome->getNumContigs());
+            memset(hitsPerContigCounts, 0, sizeof(*hitsPerContigCounts) * genome->getNumContigs());
+        } else {
+            hitsPerContigCounts = NULL;
+        }
     } else {
         candidateHashTable[FORWARD] = (HashTableAnchor *)BigAlloc(sizeof(HashTableAnchor) * candidateHashTablesSize);
         candidateHashTable[RC] = (HashTableAnchor *)BigAlloc(sizeof(HashTableAnchor) * candidateHashTablesSize);
         weightLists = (HashTableElement *)BigAlloc(sizeof(HashTableElement) * numWeightLists);
         hashTableElementPool = (HashTableElement *)BigAlloc(sizeof(HashTableElement) * hashTableElementPoolSize);
         hitCountByExtraSearchDepth = (unsigned *)BigAlloc(sizeof(*hitCountByExtraSearchDepth) * extraSearchDepth);
+        if (maxSecondaryAlignmentsPerContig > 0) {
+            hitsPerContigCounts = (HitsPerContigCounts *)BigAlloc(sizeof(*hitsPerContigCounts) * genome->getNumContigs());
+            memset(hitsPerContigCounts, 0, sizeof(*hitsPerContigCounts) * genome->getNumContigs());
+        }
+        else {
+            hitsPerContigCounts = NULL;
+        }
     }
 
     for (unsigned i = 0; i < hashTableElementPoolSize; i++) {
@@ -219,16 +237,16 @@ Arguments:
 bool _DumpAlignments = false;
 #endif  // _DEBUG
 
-    void
+    bool
 BaseAligner::AlignRead(
         Read                    *inputRead,
         SingleAlignmentResult   *primaryResult,
         int                      maxEditDistanceForSecondaryResults,
-        int                      secondaryResultBufferSize,
-        int                     *nSecondaryResults,
+        _int64                   secondaryResultBufferSize,
+        _int64                  *nSecondaryResults,
+        _int64                   maxSecondaryResults,
         SingleAlignmentResult   *secondaryResults             // The caller passes in a buffer of secondaryResultBufferSize and it's filled in by AlignRead()
-    )      // Retun value is true if there was enough room in the secondary alignment buffer for everything that was found.
-
+    )
 /*++
 
 Routine Description:
@@ -242,6 +260,7 @@ Arguments:
     maxEditDistanceForSecondaryResults  - How much worse than the primary result should we look?
     secondaryResultBufferSize           - the size of the secondaryResults buffer.  If provided, it must be at least maxK * maxSeeds * 2.
     nRescondaryResults                  - returns the number of secondary results found
+    maxSecondaryResults                 - limit the number of secondary results to this
     secondaryResults                    - returns the secondary results
 
 
@@ -251,6 +270,7 @@ Return Value:
 
 --*/
 {   
+    bool overflowedSecondaryResultsBuffer = false;
     memset(hitCountByExtraSearchDepth, 0, sizeof(*hitCountByExtraSearchDepth) * extraSearchDepth);
 
     if (NULL != nSecondaryResults) {
@@ -272,6 +292,7 @@ Return Value:
     primaryResult->direction = FORWARD;              // So we deterministically print the read forward in this case.
     primaryResult->score = UnusedScoreValue;
     primaryResult->status = NotFound;
+    primaryResult->clippingForReadAdjustment = 0;
 
     unsigned lookupsThisRun = 0;
 
@@ -291,7 +312,7 @@ Return Value:
         // Too short to have any seeds, it's hopeless.
         // No need to finalize secondary results, since we don't have any.
         //
-        return;
+        return true;
     }
 
 #ifdef TRACE_ALIGNER
@@ -327,7 +348,7 @@ Return Value:
     if (countOfNs > maxK) {
         nReadsIgnoredBecauseOfTooManyNs++;
         // No need to finalize secondary results, since we don't have any.
-        return;
+        return true;
     }
 
     //
@@ -403,14 +424,18 @@ Return Value:
                     maxEditDistanceForSecondaryResults,
                     secondaryResultBufferSize,
                     nSecondaryResults,
-                    secondaryResults);
+                    secondaryResults,
+                    &overflowedSecondaryResultsBuffer);
 
 #ifdef  _DEBUG
                 if (_DumpAlignments) printf("\tFinal result score %d MAPQ %d (%e probability of best candidate, %e probability of all candidates)  at %u\n", 
-                                            primaryResult->score, primaryResult->mapq, probabilityOfBestCandidate, probabilityOfAllCandidates, primaryResult->location);
+                                            primaryResult->score, primaryResult->mapq, probabilityOfBestCandidate, probabilityOfAllCandidates, primaryResult->location.location);
 #endif  // _DEBUG
-                finalizeSecondaryResults(nSecondaryResults, secondaryResults, maxEditDistanceForSecondaryResults, bestScore);
-                return;
+                if (overflowedSecondaryResultsBuffer) {
+                    return false;
+                }
+                finalizeSecondaryResults(read[FORWARD], primaryResult, nSecondaryResults, secondaryResults, maxSecondaryResults, maxEditDistanceForSecondaryResults, bestScore);
+                return true;
             }
             nextSeedToTest = GetWrappedNextSeedToTest(seedLen, wrapCount);
 
@@ -424,6 +449,7 @@ Return Value:
             TRACE("Skipping due to IsSeedUsed\n");
             nextSeedToTest++;
         }
+
         if (nextSeedToTest >= nPossibleSeeds) {
             //
             // Unusable seeds have pushed us past the end of the read.  Go back around the outer loop so we wrap properly.
@@ -461,7 +487,7 @@ Return Value:
             printf("\tSeed offset %2d, %4d hits, %4d rcHits.", nextSeedToTest, nHits[0], nHits[1]);
             for (int rc = 0; rc < 2; rc++) {
                 for (unsigned i = 0; i < __min(nHits[rc], 5); i++) {
-                    printf(" %sHit at %9llu.", rc == 1 ? "RC " : "", doesGenomeIndexHave64BitLocations ? hits[rc][i] : (_int64)hits32[rc][i]);
+		  printf(" %sHit at %9llu.", rc == 1 ? "RC " : "", doesGenomeIndexHave64BitLocations ? hits[rc][i].location : (_int64)hits32[rc][i]);
                 }
             }
             printf("\n");
@@ -527,7 +553,7 @@ Return Value:
                     // then we do all of the inserts, and then repeat.
                     //
 
-		  _int64 innerLimit = min((_int64)iBase + prefetchDepth, min(nHits[direction], (_int64)maxHitsToConsider));
+		            _int64 innerLimit = min((_int64)iBase + prefetchDepth, min(nHits[direction], (_int64)maxHitsToConsider));
                     if (doAlignerPrefetch) {
                         for (unsigned i = iBase; i < innerLimit; i++) {
                             if (doesGenomeIndexHave64BitLocations) {
@@ -600,14 +626,17 @@ Return Value:
                     maxEditDistanceForSecondaryResults,
                     secondaryResultBufferSize,
                     nSecondaryResults,
-                    secondaryResults)) {
+                    secondaryResults,
+                    &overflowedSecondaryResultsBuffer)) {
 
 #ifdef  _DEBUG
-                if (_DumpAlignments) printf("\tFinal result score %d MAPQ %d at %u\n", primaryResult->score, primaryResult->mapq, primaryResult->location);
+                if (_DumpAlignments) printf("\tFinal result score %d MAPQ %d at %u\n", primaryResult->score, primaryResult->mapq, primaryResult->location.location);
 #endif  // _DEBUG
-
-                finalizeSecondaryResults(nSecondaryResults, secondaryResults, maxEditDistanceForSecondaryResults, bestScore);
-                return;
+                if (overflowedSecondaryResultsBuffer) {
+                    return false;
+                }
+                finalizeSecondaryResults(read[FORWARD], primaryResult, nSecondaryResults, secondaryResults, maxSecondaryResults, maxEditDistanceForSecondaryResults, bestScore);
+                return true;
             }
         }
     }
@@ -625,14 +654,19 @@ Return Value:
         maxEditDistanceForSecondaryResults,
         secondaryResultBufferSize,
         nSecondaryResults,
-        secondaryResults);
+        secondaryResults,
+        &overflowedSecondaryResultsBuffer);
 
 #ifdef  _DEBUG
-    if (_DumpAlignments) printf("\tFinal result score %d MAPQ %d (%e probability of best candidate, %e probability of all candidates) at %u\n", primaryResult->score, primaryResult->mapq, probabilityOfBestCandidate, probabilityOfAllCandidates, primaryResult->location);
+    if (_DumpAlignments) printf("\tFinal result score %d MAPQ %d (%e probability of best candidate, %e probability of all candidates) at %u\n", primaryResult->score, primaryResult->mapq, probabilityOfBestCandidate, probabilityOfAllCandidates, primaryResult->location.location);
 #endif  // _DEBUG
 
-    finalizeSecondaryResults(nSecondaryResults, secondaryResults, maxEditDistanceForSecondaryResults, bestScore);
-    return;
+    if (overflowedSecondaryResultsBuffer) {
+        return false;
+    }
+
+    finalizeSecondaryResults(read[FORWARD], primaryResult, nSecondaryResults, secondaryResults, maxSecondaryResults, maxEditDistanceForSecondaryResults, bestScore);
+    return true;
 }
 
     bool
@@ -641,9 +675,10 @@ BaseAligner::score(
         Read                    *read[NUM_DIRECTIONS],
         SingleAlignmentResult   *primaryResult,
         int                      maxEditDistanceForSecondaryResults,
-        int                      secondaryResultBufferSize,
-        int                     *nSecondaryResults,
-        SingleAlignmentResult   *secondaryResults)
+        _int64                   secondaryResultBufferSize,
+        _int64                  *nSecondaryResults,
+        SingleAlignmentResult   *secondaryResults,
+        bool                    *overflowedSecondaryBuffer)
 /*++
 
 Routine Description:
@@ -685,6 +720,7 @@ Return Value:
 
 --*/
 {
+    *overflowedSecondaryBuffer = false;
 #ifdef TRACE_ALIGNER
     printf("score() called with force=%d nsa=%d nrcsa=%d best=%u bestloc=%u 2nd=%u\n",
         forceResult, nSeedsApplied[FORWARD], nSeedsApplied[RC], bestScore, bestScoreGenomeLocation, secondBestScore);
@@ -701,11 +737,10 @@ Return Value:
     if (0 == mostSeedsContainingAnyParticularBase[FORWARD] && 0 == mostSeedsContainingAnyParticularBase[RC]) {
         //
         // The only way we can get here is if we've tried all of the seeds that we're willing
-        // to try and every one of them generated too many hits to process.  Declare
-        // a multi hit and give up.
+        // to try and every one of them generated too many hits to process.  Give up.
         //
         _ASSERT(forceResult);
-        primaryResult->status = MultipleHits;
+        primaryResult->status = NotFound;
         primaryResult->mapq = 0;
         return true;
     }
@@ -756,9 +791,7 @@ Return Value:
                     }
                     return true;
                 } else {
-                    // If none of our seeds was below the popularity threshold, report this as MultipleHits; otherwise,
-                    // report it as NotFound
-                    primaryResult->status = (nSeedsApplied[FORWARD] == 0 && nSeedsApplied[RC] == 0) ? MultipleHits : NotFound;
+                    primaryResult->status = NotFound;
                     primaryResult->mapq = 0;
                     return true;
                 }
@@ -822,34 +855,6 @@ Return Value:
                 GenomeDistance genomeDataLength = readDataLength + MAX_K; // Leave extra space in case the read has deletions
                 const char *data = genome->getSubstring(genomeLocation, genomeDataLength);
 
-#if 0 // This only happens when we're in the padding region, and genomeLocations there just lead to problems.  Just say no.
-                if (NULL == data) {
-                    //
-                    // We're up against the end of a chromosome.  Reduce the extra space enough that it isn't too
-                    // long.  We're willing to reduce it to less than the length of a read, because the read could
-                    // butt up against the end of the chromosome and have insertions in it.
-                    //
-                    const Genome::Contig *contig = genome->getContigAtLocation(genomeLocation);
-
-                    if (contig != NULL) {
-                        GenomeLocation endLocation;
-                        if (genomeLocation + readDataLength + MAX_K >= GenomeLocation(0) + genome->getCountOfBases()) {
-                            endLocation = GenomeLocation(0) + genome->getCountOfBases();
-                        } else {
-                            const Genome::Contig *nextContig = genome->getNextContigAfterLocation(genomeLocation);
-                            _ASSERT(contig->beginningLocation <= genomeLocation && contig != nextContig);
-
-                            endLocation = nextContig->beginningLocation;
-                        }
-                        genomeDataLength = endLocation - genomeLocation - 1;
-                        if (genomeDataLength >= readDataLength - MAX_K) {
-                            data = genome->getSubstring(genomeLocation, genomeDataLength);
-                            _ASSERT(NULL != data);
-                        }
-                    }
-                }
-
-#endif // 0
                 if (data != NULL) {
                     Read *readToScore = read[elementToScore->direction];
 
@@ -868,7 +873,6 @@ Return Value:
                     int tailStart = seedOffset + seedLen;
 
                     _ASSERT(!memcmp(data+seedOffset, readToScore->getData() + seedOffset, seedLen));
-
                     int textLen = (int)__min(genomeDataLength - tailStart, 0x7ffffff0);
                     score1 = landauVishkin->computeEditDistance(data + tailStart, textLen, readToScore->getData() + tailStart, readToScore->getQuality() + tailStart, readLen - tailStart,
                         scoreLimit, &matchProb1);
@@ -893,7 +897,7 @@ Return Value:
                             //
                             // Adjust the genome location based on any indels that we found.
                             //
-                            genomeLocation += genomeLocationOffset;
+                           genomeLocation += genomeLocationOffset;
 
                             //
                             // We could mark as scored anything in between the old and new genome offsets, but it's probably not worth the effort since this is
@@ -911,7 +915,7 @@ Return Value:
 
 
 #ifdef  _DEBUG
-                if (_DumpAlignments) printf("Scored %9u weight %2d limit %d, result %2d %s\n", genomeLocation, elementToScore->weight, scoreLimit, score, elementToScore->direction ? "RC" : "");
+                if (_DumpAlignments) printf("Scored %9u weight %2d limit %d, result %2d %s\n", genomeLocation.location, elementToScore->weight, scoreLimit, score, elementToScore->direction ? "RC" : "");
 #endif  // _DEBUG
 
                 candidateToScore->score = score;
@@ -1011,8 +1015,8 @@ Return Value:
                     //
                     if (NULL != secondaryResults && (int)(bestScore - score) <= maxEditDistanceForSecondaryResults) { // bestScore is initialized to UnusedScoreValue, which is large, so this won't fire if this is the first candidate
                         if (secondaryResultBufferSize <= *nSecondaryResults) {
-                            WriteErrorMessage("Out of secondary result buffer in BaseAliner::score(), which shouldn't be possible");
-                            soft_exit(1);
+                            *overflowedSecondaryBuffer = true;
+                            return true;
                         }
 
                         SingleAlignmentResult *result = &secondaryResults[*nSecondaryResults];
@@ -1021,6 +1025,7 @@ Return Value:
                         result->mapq = 0;
                         result->score = bestScore;
                         result->status = MultipleHits;
+                        result->clippingForReadAdjustment = 0;
 
                         _ASSERT(result->score != -1);
 
@@ -1034,6 +1039,7 @@ Return Value:
                     primaryResult->location = bestScoreGenomeLocation;
                     primaryResult->score = bestScore;
                     primaryResult->direction = elementToScore->direction;
+                    _ASSERT(0 == primaryResult->clippingForReadAdjustment);
 
                     lvScoresAfterBestFound = 0;
                 } else {
@@ -1051,8 +1057,8 @@ Return Value:
                     //
                     if (-1 != maxEditDistanceForSecondaryResults && NULL != secondaryResults && (int)(bestScore - score) <= maxEditDistanceForSecondaryResults && score != -1) {
                          if (secondaryResultBufferSize <= *nSecondaryResults) {
-                            WriteErrorMessage("Out of secondary result buffer in BaseAliner::score(), which shouldn't be possible");
-                            soft_exit(1);
+                            *overflowedSecondaryBuffer = true;
+                            return true;
                         }
 
                         SingleAlignmentResult *result = &secondaryResults[*nSecondaryResults];
@@ -1061,6 +1067,7 @@ Return Value:
                         result->mapq = 0;
                         result->score = score;
                         result->status = MultipleHits;
+                        result->clippingForReadAdjustment = 0;
 
                         _ASSERT(result->score != -1);
 
@@ -1336,6 +1343,11 @@ Return Value:
 
         BigDealloc(hashTableElementPool);
         hashTableElementPool = NULL;
+
+        if (NULL != hitsPerContigCounts) {
+            BigDealloc(hitsPerContigCounts);
+            hitsPerContigCounts = NULL;
+        }
     }
 }
 
@@ -1417,8 +1429,8 @@ BaseAligner::incrementWeight(HashTableElement *element)
 }
 
     size_t
-BaseAligner::getBigAllocatorReservation(bool ownLandauVishkin, unsigned maxHitsToConsider, unsigned maxReadSize,
-                unsigned seedLen, unsigned numSeedsFromCommandLine, double seedCoverage)
+BaseAligner::getBigAllocatorReservation(GenomeIndex *index, bool ownLandauVishkin, unsigned maxHitsToConsider, unsigned maxReadSize,
+                unsigned seedLen, unsigned numSeedsFromCommandLine, double seedCoverage, int maxSecondaryAlignmentsPerContig, unsigned extraSearchDepth)
 {
     unsigned maxSeedsToUse;
     if (0 != numSeedsFromCommandLine) {
@@ -1428,25 +1440,36 @@ BaseAligner::getBigAllocatorReservation(bool ownLandauVishkin, unsigned maxHitsT
     }
     size_t candidateHashTablesSize = (maxHitsToConsider * maxSeedsToUse * 3)/2;    // *1.5 for hash table slack
     size_t hashTableElementPoolSize = maxHitsToConsider * maxSeedsToUse * 2 ;   // *2 for RC
+    size_t contigCounters;
+    if (maxSecondaryAlignmentsPerContig > 0) {
+        contigCounters = sizeof(HitsPerContigCounts)* index->getGenome()->getNumContigs();
+    } else {
+        contigCounters = 0;
+    }
 
     return
-        sizeof(_uint64) * 14                                        + // allow for alignment
-        sizeof(BaseAligner)                                         + // our own member variables
+        contigCounters                                                  +
+        sizeof(_uint64) * 14                                            + // allow for alignment
+        sizeof(BaseAligner)                                             + // our own member variables
         (ownLandauVishkin ?
             LandauVishkin<>::getBigAllocatorReservation() +
-            LandauVishkin<-1>::getBigAllocatorReservation() : 0)    + // our LandauVishkin objects
-        sizeof(char) * maxReadSize * 2                              + // rcReadData
-        sizeof(char) * maxReadSize * 4 + 2 * MAX_K                  + // reversed read (both)
-        sizeof(BYTE) * (maxReadSize + 7 + 128) / 8                  + // seed used
-        sizeof(HashTableElement) * hashTableElementPoolSize         + // hash table element pool
-        sizeof(HashTableAnchor) * candidateHashTablesSize * 2       + // candidate hash table (both)
-        sizeof(HashTableElement) * (maxSeedsToUse + 1);               // weight lists
+            LandauVishkin<-1>::getBigAllocatorReservation() : 0)        + // our LandauVishkin objects
+        sizeof(char) * maxReadSize * 2                                  + // rcReadData
+        sizeof(char) * maxReadSize * 4 + 2 * MAX_K                      + // reversed read (both)
+        sizeof(BYTE) * (maxReadSize + 7 + 128) / 8                      + // seed used
+        sizeof(HashTableElement) * hashTableElementPoolSize             + // hash table element pool
+        sizeof(HashTableAnchor) * candidateHashTablesSize * 2           + // candidate hash table (both)
+        sizeof(HashTableElement) * (maxSeedsToUse + 1)                  + // weight lists
+        sizeof(unsigned) * extraSearchDepth;                              // hitCountByExtraSearchDepth
 }
 
     void 
 BaseAligner::finalizeSecondaryResults(
-    int                     *nSecondaryResults,                     // in/out
+    Read                    *read,
+    SingleAlignmentResult   *primaryResult,
+    _int64                  *nSecondaryResults,                     // in/out
     SingleAlignmentResult   *secondaryResults,
+    _int64                   maxSecondaryResults,
     int                      maxEditDistanceForSecondaryResults,
     int                      bestScore)
 {
@@ -1455,6 +1478,34 @@ BaseAligner::finalizeSecondaryResults(
     // within the bound when it's scored, but if we subsequently found a better fit, then it may no longer be
     // close enough.  Get rid of those now.
     //
+    // NB: This code is very similar to code at the end of IntersectingPairedEndAligner::align().  Sorry.
+    //
+
+    _ASSERT(bestScore == primaryResult->score);
+
+    primaryResult->scorePriorToClipping = primaryResult->score;
+
+    if (!ignoreAlignmentAdjustmentsForOm) {
+        //
+        // Start by adjusting the alignments for the primary and secondary reads, since that can affect their score
+        // and hence whether they should be kept.
+        //
+        alignmentAdjuster.AdjustAlignment(read, primaryResult);
+        if (primaryResult->status != NotFound) {
+            bestScore = primaryResult->score;
+        }
+        else {
+            bestScore = 65536;
+        }
+
+        for (int i = 0; i < *nSecondaryResults; i++) {
+            secondaryResults[i].scorePriorToClipping = secondaryResults[i].score;
+            alignmentAdjuster.AdjustAlignment(read, &secondaryResults[i]);
+            if (secondaryResults[i].status != NotFound) {
+                bestScore = __min(bestScore, secondaryResults[i].score);
+            }
+        }
+    }
 
     int worstScoreToKeep = min((int)maxK, bestScore + maxEditDistanceForSecondaryResults);
 
@@ -1469,18 +1520,77 @@ BaseAligner::finalizeSecondaryResults(
             secondaryResults[i] = secondaryResults[(*nSecondaryResults)-1];
             (*nSecondaryResults)--;
         } else {
+            if (ignoreAlignmentAdjustmentsForOm) {
+                secondaryResults[i].scorePriorToClipping = secondaryResults[i].score;
+            }
             i++;
         }
     }
-}
 
-    unsigned 
-BaseAligner::getMaxSecondaryResults(unsigned maxSeedsToUse, double maxSeedCoverage, unsigned maxReadSize, unsigned maxHits, unsigned seedLength)
-{
+    if (maxSecondaryAlignmentsPerContig > 0 && primaryResult->status != NotFound) {
+        //
+        // Run through the results and count the number of results per contig, to see if any of them are too big.
+        //
 
-    if (0 != maxSeedsToUse) {
-        return maxHits * maxSeedsToUse * NUM_DIRECTIONS; // Can't have more alignments than total possible hits 
-    } else {
-        return (unsigned)((maxSeedCoverage * maxReadSize + seedLength) / seedLength) * maxHits * NUM_DIRECTIONS;
+        bool anyContigHasTooManyResults = false;
+
+        int primaryResultContigNum = genome->getContigNumAtLocation(primaryResult->location);
+        hitsPerContigCounts[primaryResultContigNum].hits = 1;
+        hitsPerContigCounts[primaryResultContigNum].epoch = hashTableEpoch;
+
+        for (i = 0; i < *nSecondaryResults; i++) {
+            int contigNum = genome->getContigNumAtLocation(secondaryResults[i].location);
+            if (hitsPerContigCounts[contigNum].epoch != hashTableEpoch) {
+                hitsPerContigCounts[contigNum].epoch = hashTableEpoch;
+                hitsPerContigCounts[contigNum].hits = 0;
+            }
+
+            hitsPerContigCounts[contigNum].hits++;
+            if (hitsPerContigCounts[contigNum].hits > maxSecondaryAlignmentsPerContig) {
+                anyContigHasTooManyResults = true;
+                break;
+            }
+        }
+
+        if (anyContigHasTooManyResults) {
+            //
+            // Just sort them all, in order of contig then hit depth.
+            //
+            qsort(secondaryResults, *nSecondaryResults, sizeof(*secondaryResults), SingleAlignmentResult::compareByContigAndScore);
+
+            //
+            // Now run through and eliminate any contigs with too many hits.  We can't use the same trick at the first loop above, because the
+            // counting here relies on the results being sorted.  So, instead, we just copy them as we go.
+            //
+            int currentContigNum = -1;
+            int currentContigCount = 0;
+            int destResult = 0;
+
+            for (int sourceResult = 0; sourceResult < *nSecondaryResults; sourceResult++) {
+                int contigNum = genome->getContigNumAtLocation(secondaryResults[sourceResult].location);
+                if (contigNum != currentContigNum) {
+                    currentContigNum = contigNum;
+                    currentContigCount = (contigNum == primaryResultContigNum) ? 1 : 0;
+                }
+
+                currentContigCount++;
+
+                if (currentContigCount <= maxSecondaryAlignmentsPerContig) {
+                    //
+                    // Keep it.  If we don't get here, then we don't copy the result and
+                    // don't increment destResult.  And yes, this will sometimes copy a
+                    // result over itself.  That's harmless.
+                    //
+                    secondaryResults[destResult] = secondaryResults[sourceResult];
+                    destResult++;
+                }
+            } // for each source result
+            *nSecondaryResults = destResult;
+        }
+    } // if maxSecondaryAlignmentsPerContig > 0
+
+    if (*nSecondaryResults > maxSecondaryResults) {
+        qsort(secondaryResults, *nSecondaryResults, sizeof(*secondaryResults), SingleAlignmentResult::compareByScore);
+        *nSecondaryResults = maxSecondaryResults;   // Just truncate it
     }
 }

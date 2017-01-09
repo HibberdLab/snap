@@ -14,7 +14,7 @@ Authors:
     Ravi Pandya, May, 2012
 
 Environment:
-`
+
     User mode service.
 
 Revision History:
@@ -88,18 +88,17 @@ void AlignerContext::runAlignment(int argc, const char **argv, const char *versi
     extension->initialize();
     
     if (! extension->skipAlignment()) {
-        printStatsHeader();
-        do {
+        WriteStatusMessage("Aligning.\n");
 
-            beginIteration();
+        beginIteration();
 
-            runTask();
+        runTask();
             
-            finishIteration();
-            
-            printStats();
+        finishIteration();
 
-        } while (nextIteration());
+        printStats();
+
+        nextIteration();    // This probably should get rolled into something else; it's really cleanup code, not "next iteration"
     }
 
     extension->finishAlignment();
@@ -156,7 +155,7 @@ AlignerContext::initialize()
             index = GenomeIndex::loadFromDirectory((char*) options->indexDir, options->mapIndex, options->prefetchIndex);
             if (index == NULL) {
                 WriteErrorMessage("Index load failed, aborting.\n");
-				return false;
+				soft_exit(1);
             }
             g_index = index;
 
@@ -176,20 +175,27 @@ AlignerContext::initialize()
     noUkkonen = options->noUkkonen;
     noOrderedEvaluation = options->noOrderedEvaluation;
 	noTruncation = options->noTruncation;
+    ignoreAlignmentAdjustmentForOm = options->ignoreAlignmentAdjustmentsForOm;
     maxSecondaryAlignmentAdditionalEditDistance = options->maxSecondaryAlignmentAdditionalEditDistance;
 	maxSecondaryAlignments = options->maxSecondaryAlignments;
+    maxSecondaryAlignmentsPerContig = options->maxSecondaryAlignmentsPerContig;
+
+    if (maxSecondaryAlignmentAdditionalEditDistance < 0 && (maxSecondaryAlignments < 1000000 || maxSecondaryAlignmentsPerContig > 0)) {
+        WriteErrorMessage("You set -omax and/or -mpc without setting -om.  They're meaningful only in the context of -om, so you probably didn't really mean to do that.\n");
+        soft_exit(1);
+    }
 	minReadLength = options->minReadLength;
 
 	if (index != NULL && (int)minReadLength < index->getSeedLength()) {
 		WriteErrorMessage("The min read length (%d) must be at least the seed length (%d), or there's no hope of aligning reads that short.\n", minReadLength, index->getSeedLength());
-		return false;
+		soft_exit(1);
 	}
 
     if (options->perfFileName != NULL) {
         perfFile = fopen(options->perfFileName,"a");
         if (NULL == perfFile) {
             WriteErrorMessage("Unable to open perf file '%s'\n", options->perfFileName);
-			return false;
+			soft_exit(1);
         }
     }
 
@@ -198,11 +204,6 @@ AlignerContext::initialize()
     return true;
 }
 
-    void
-AlignerContext::printStatsHeader()
-{
-	WriteStatusMessage("Total Reads    Aligned, MAPQ >= %2d    Aligned, MAPQ < %2d     Unaligned              Too Short/Too Many Ns  %%Pairs\tReads/s   Time in Aligner (s)\n", MAPQ_LIMIT_FOR_SINGLE_HIT, MAPQ_LIMIT_FOR_SINGLE_HIT);
-}
 
     void
 AlignerContext::beginIteration()
@@ -264,9 +265,24 @@ AlignerContext::finishIteration()
     extension->finishIteration();
 
     if (NULL != writerSupplier) {
+        if (options->dropIndexBeforeSort) {
+            g_index->dropIndex();
+
+        }
         writerSupplier->close();
         delete writerSupplier;
         writerSupplier = NULL;
+
+        if (options->dropIndexBeforeSort) {
+            //
+            // Since we dropped the index part of the index, now we need to delete it completely.
+            //
+            delete g_index;
+            g_index = NULL;
+            index = NULL;
+            delete g_indexDirectory;
+            g_indexDirectory = NULL;
+        }
     }
 
     alignTime = /*timeInMillis() - alignStart -- use the time from ParallelTask.h, that may exclude memory allocation time*/ time;
@@ -282,7 +298,7 @@ AlignerContext::nextIteration()
     return false;
 }
 
-extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t outputBufferSize);	// Relying on the one in Util.h results in an "internal compiler error" for Visual Studio.
+extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t outputBufferSize, size_t desiredLength = 0);	// Relying on the one in Util.h results in an "internal compiler error" for Visual Studio.
 
 //
 // Take an integer and a percentage, and turn it into a string of the form "number (percentage%)<padding>" where
@@ -290,16 +306,17 @@ extern char *FormatUIntWithCommas(_uint64 val, char *outputBuffer, size_t output
 //
 char *numPctAndPad(char *buffer, _uint64 num, double pct, size_t desiredWidth, size_t bufferLen)
 {
-	_ASSERT(desiredWidth < bufferLen);	// < to leave room for trailing null.
+	_ASSERT(desiredWidth + 1 < bufferLen);	// < to leave room for trailing null.
 
 	FormatUIntWithCommas(num, buffer, bufferLen);
 	const size_t percentageBufferSize = 100;	// Plenty big enough for any value
 	char percentageBuffer[percentageBufferSize];
 
 	sprintf(percentageBuffer, " (%.02f%%)", pct);
-	if (strlen(percentageBuffer) + strlen(buffer) >= bufferLen) {
+	if (strlen(percentageBuffer) + strlen(buffer) >= bufferLen || desiredWidth >= bufferLen) { // >= accounts for terminating null
 		WriteErrorMessage("numPctAndPad: overflowed output buffer\n");
-		soft_exit(1);
+        buffer[0] = '\0';
+        return buffer;
 	}
 
 	strcat(buffer, percentageBuffer);
@@ -310,10 +327,43 @@ char *numPctAndPad(char *buffer, _uint64 num, double pct, size_t desiredWidth, s
 	return buffer;
 }
 
+char *pctAndPad(char * buffer, double pct, size_t desiredWidth, size_t bufferLen, bool useDecimal)
+{
+    _ASSERT(desiredWidth + 1 < bufferLen);
+
+    const size_t percentageBufferSize = 100;	// Plenty big enough for any value
+    char percentageBuffer[percentageBufferSize];
+
+    if (useDecimal) {
+        sprintf(percentageBuffer, "%.02f%%", pct);
+    } else {
+        sprintf(percentageBuffer, "%d%%",  (unsigned)((100.0 * pct) + .5));
+    }
+
+    if (strlen(percentageBuffer) + 1 > bufferLen) {
+        WriteErrorMessage("pctAndPad: buffer too small\n");
+        buffer[0] = '\0';
+        return buffer;
+    }
+
+    strcpy(buffer, percentageBuffer);
+    for (size_t x = strlen(buffer); x < desiredWidth; x++) {
+        strcat(buffer, " ");
+    }
+
+    return buffer;
+}
+
     void
 AlignerContext::printStats()
 {
-    double usefulReads = max((double) stats->usefulReads, 1.0);
+
+    WriteStatusMessage("Total Reads    Aligned, MAPQ >= %2d    Aligned, MAPQ < %2d     Unaligned              Too Short/Too Many Ns  %s%s%sReads/s   Time in Aligner (s)%s\n", MAPQ_LIMIT_FOR_SINGLE_HIT, MAPQ_LIMIT_FOR_SINGLE_HIT,
+        (stats->filtered > 0) ? "Filtered               " : "",
+        (stats->extraAlignments) ? "Extra Alignments  " : "",
+        isPaired() ? "%Pairs    " : "   ",
+        options->profile ? (!options->sortOutput ? " Read Align Write(& compress)" : " Read Align Write") : ""
+        );
 
 	const size_t strBufLen = 50;	// Way more than enough for 64 bit numbers with commas
 	char tooShort[strBufLen];
@@ -324,28 +374,53 @@ AlignerContext::printStats()
 	char readsPerSecond[strBufLen];
 	char alignTimeString[strBufLen];
 
-	WriteStatusMessage("%-14s %s %s %s %s %.02f%%%\t%-9s %s\n",
-		FormatUIntWithCommas(stats->totalReads, numReads, strBufLen),
-		numPctAndPad(single, stats->singleHits, 100.0 * stats->singleHits / stats->totalReads, 22, strBufLen),
-		numPctAndPad(multi, stats->multiHits, 100.0 * stats->multiHits / stats->totalReads, 22, strBufLen),
-		numPctAndPad(unaligned, stats->notFound, 100.0 * stats->notFound / stats->totalReads, 22, strBufLen),
-		numPctAndPad(tooShort, stats->totalReads - stats->usefulReads, 100.0 * (stats->totalReads - stats->usefulReads) / max(stats->totalReads, (_int64)1), 22, strBufLen),
-		100.0 * stats->alignedAsPairs / stats->totalReads,
+    char filtered[strBufLen];
+    char extraAlignments[strBufLen];
+    char pctPairs[strBufLen];
+    char pctRead[strBufLen];
+    char pctAlign[strBufLen];
+    char pctWrite[strBufLen];
+    _int64 totalTime = stats->millisReading + stats->millisAligning + stats->millisWriting;
+
+    /*
+                         total                                   
+                         |  single                       
+                         |  |  multi                                      
+                         |  |  |  unaligned        reads/s            
+                         |  |  |  |  too short     |  time             
+                         |  |  |  |  |  filtered   |  | %Read       
+                         |  |  |  |  |  | extra    |  | | %Align    
+                         |  |  |  |  |  | | pairs  |  | | | %Write 
+                         |  |  |  |  |  | | |      |  | | | |  
+                         v  v  v  v  v  v v v      v  v v v v
+    */
+    WriteStatusMessage("%s %s %s %s %s %s%s%s   %-9s %s%s%s%s\n",
+        FormatUIntWithCommas(stats->totalReads, numReads, strBufLen, 14),
+        numPctAndPad(single, stats->singleHits, 100.0 * stats->singleHits / stats->totalReads, 22, strBufLen),
+        numPctAndPad(multi, stats->multiHits, 100.0 * stats->multiHits / stats->totalReads, 22, strBufLen),
+        numPctAndPad(unaligned, stats->notFound, 100.0 * stats->notFound / stats->totalReads, 22, strBufLen),
+        numPctAndPad(tooShort, stats->uselessReads , 100.0 * stats->uselessReads / max(stats->totalReads, (_int64)1), 22, strBufLen),
+        (stats->filtered > 0) ? numPctAndPad(filtered, stats->filtered, 100.0 * stats->filtered / stats->totalReads, 23, strBufLen) : "",
+        (stats->extraAlignments > 0) ? FormatUIntWithCommas(stats->extraAlignments, extraAlignments, strBufLen, 18) : "",
+		isPaired() ? pctAndPad(pctPairs,  100.0 * stats->alignedAsPairs / stats->totalReads, 7, strBufLen, true) : "",
 		FormatUIntWithCommas((unsigned _int64)(1000 * stats->totalReads / max(alignTime, (_int64)1)), readsPerSecond, strBufLen),	// Aligntime is in ms
-		FormatUIntWithCommas((alignTime + 500) / 1000, alignTimeString, strBufLen)
-		);
+		FormatUIntWithCommas((alignTime + 500) / 1000, alignTimeString, strBufLen, 20),
+        options->profile ? pctAndPad(pctRead, (double)stats->millisReading / (double)totalTime, 5, strBufLen, false) : "",
+        options->profile ? pctAndPad(pctAlign, (double)stats->millisAligning / (double)totalTime, 6, strBufLen, false) : "",
+        options->profile ? pctAndPad(pctWrite, (double)stats->millisWriting / (double)totalTime, 6, strBufLen, false) : ""
+        );
 
     if (NULL != perfFile) {
         fprintf(perfFile, "%d\t%d\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%0.2f%%\t%lld\t%lld\tt%.0f\n",
                 maxHits_, maxDist_, 
-                100.0 * usefulReads / max(stats->totalReads, (_int64) 1),
+                100.0 * (stats->totalReads - stats->uselessReads) / max(stats->totalReads, (_int64) 1),
 				100.0 * stats->singleHits / stats->totalReads,
 				100.0 * stats->multiHits / stats->totalReads,
 				100.0 * stats->notFound / stats->totalReads,
                 stats->lvCalls,
 				100.0 * stats->alignedAsPairs / stats->totalReads,
                 stats->totalReads,
-                (1000.0 * usefulReads) / max(alignTime, (_int64) 1));
+                (1000.0 * (stats->totalReads - stats->uselessReads)) / max(alignTime, (_int64)1));
 
         fprintf(perfFile,"\n");
     }
@@ -389,9 +464,9 @@ AlignerContext::parseOptions(
     AlignerOptions *options;
 
     if (paired) {
-        options = new PairedAlignerOptions("snap paired <index-dir> <inputFile(s)> [<options>] where <input file(s)> is a list of files to process.\n");
+        options = new PairedAlignerOptions("snap-aligner paired <index-dir> <inputFile(s)> [<options>] where <input file(s)> is a list of files to process.\n");
     } else {
-        options = new AlignerOptions("snap single <index-dir> <inputFile(s)> [<options>] where <input file(s)> is a list of files to process.\n");
+        options = new AlignerOptions("snap-aligner single <index-dir> <inputFile(s)> [<options>] where <input file(s)> is a list of files to process.\n");
     }
 
     options->extra = extension->extraOptions();

@@ -88,6 +88,7 @@ struct BAMHeaderRefSeq
 
 // information for each alignment record
 struct BAMAlignAux;
+class BAMReader;
 struct BAMAlignment
 {
     _int32      block_size;
@@ -133,6 +134,9 @@ struct BAMAlignment
     // conversions
 
     static const char* CodeToSeq;
+    static const char* CodeToSeqRC;
+    static _uint16 CodeToSeqPair[256];
+    static _uint16 CodeToSeqPairRC[256];
     static _uint8 SeqToCode[256];
     static const char* CodeToCigar;
     static _uint8 CigarToCode[256];
@@ -140,9 +144,12 @@ struct BAMAlignment
     static int GetCigarOpCode(_uint32 op) { return op & 0xf; }
     static int GetCigarOpCount(_uint32 op) { return op >> 4; }
     
-    static void decodeSeq(char* o_sequence, _uint8* nibbles, int bases);
+    static void decodeSeq(char* o_sequence, const _uint8* nibbles, int bases);
     static void decodeQual(char* o_qual, char* quality, int bases);
+    static void decodeSeqRC(char* o_sequence, const _uint8* nibbles, int bases);
+    static void decodeQualRC(char* o_qual, char* quality, int bases);
     static bool decodeCigar(char* o_cigar, int cigarSize, _uint32* cigar, int ops);
+    static void getClippingFromCigar(_uint32 *cigar, int ops, unsigned *o_frontClipping, unsigned *o_backClipping, unsigned *o_frontHardClipping, unsigned *o_backHardClipping);
 
     static void encodeSeq(_uint8* nibbles, char* ascii, int length);
 
@@ -164,11 +171,17 @@ struct BAMAlignment
     // absoluate genome locations
 
     GenomeLocation getLocation(const Genome* genome) const
-    { return genome == NULL || pos < 0 || refID < 0 || refID >= genome->getNumContigs() || (FLAG & SAM_UNMAPPED)
-        ? UINT32_MAX : (genome->getContigs()[refID].beginningLocation + pos); }
+    {
+        return genome == NULL || pos < 0 || refID < 0 || refID >= genome->getNumContigs() || (FLAG & SAM_UNMAPPED)
+            ? UINT32_MAX : (genome->getContigs()[refID].beginningLocation + pos);
+    }
 
     GenomeLocation getNextLocation(const Genome* genome) const
     { return next_pos < 0 || next_refID < 0 || (FLAG & SAM_NEXT_UNMAPPED) ? UINT32_MAX : (genome->getContigs()[next_refID].beginningLocation + next_pos); }
+
+    GenomeLocation getLocation(const BAMReader * bamReader) const;  // Use this version for input reads rather than for SNAP-aligned ones
+
+    GenomeLocation getNextLocation(const BAMReader * bamReader) const;  // Use this version for input reads rather than for SNAP-aligned ones
 
 #ifdef VALIDATE_BAM
     void validate();
@@ -411,6 +424,14 @@ public:
         static const int MAX_SEQ_LENGTH;
         static const int MAX_RECORD_LENGTH;
 
+        const GenomeLocation getLocationForRefAndOffset(int ref, unsigned offset) const
+        {
+            if (ref < 0 || ref >= n_ref || refLocation[ref] == InvalidGenomeLocation) {
+                return InvalidGenomeLocation;
+            }
+            return refLocation[ref] + offset;
+        }
+
 protected:
 
         virtual bool getNextRead(Read *read, AlignmentResult *alignmentResult, 
@@ -427,7 +448,7 @@ private:
         char* getExtra(_int64 bytes);
 
         DataReader*         data;
-        //unsigned            n_ref; // number of reference sequences
-        //unsigned*           refOffset; // array mapping ref sequence ID to contig location
+        int                 n_ref; // number of reference sequences
+        GenomeLocation*     refLocation; // array mapping ref sequence ID to contig genome location
         _int64              extraOffset; // offset into extra data
 };

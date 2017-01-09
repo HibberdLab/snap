@@ -28,6 +28,7 @@ Revision History:
 #include "Genome.h"
 
 class DataWriterSupplier;
+struct AlignerOptions;
 
 // per-thread writer for data into a single destination
 class DataWriter
@@ -136,9 +137,12 @@ public:
     
     static DataWriterSupplier* create(
         const char* filename,
+        size_t bufferSize,
+        bool emitInternalScore,
+        char *internalScoreTag,
         DataWriter::FilterSupplier* filterSupplier = NULL,
         FileEncoder* encoder = NULL,
-        int count = 4, size_t bufferSize = 16 * 1024 * 1024);
+        int count = 4);
     
     static DataWriterSupplier* sorted(
         const FileFormat* format,
@@ -148,7 +152,12 @@ public:
         int numThreads,
         const char* sortedFileName,
         DataWriter::FilterSupplier* sortedFilterSupplier,
+        size_t maxBufferSize,
+        bool emitInternalScore,
+        char *internalScoreTag,
         FileEncoder* encoder = NULL);
+
+    static char *generateSortIntermediateFilePathName(AlignerOptions *options);
 
     // defaults follow BAM output spec
     static GzipWriterFilterSupplier* gzip(bool bamFormat, size_t chunkSize, int numThreads, bool bindToProcessors, bool multiThreaded);

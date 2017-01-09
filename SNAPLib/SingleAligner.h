@@ -2,11 +2,11 @@
 
 Module Name:
 
-    SingleAligner.cpp
+    SingleAligner.h
 
 Abstract:
 
-    Functions for running the single end aligner sub-program.
+    Headers for running the single end aligner sub-program.
 
 Authors:
 
@@ -50,8 +50,6 @@ protected:
     virtual void typeSpecificNextIteration();
 
     // for subclasses
-
-    virtual void writeRead(Read* read, const SingleAlignmentResult &result, bool secondaryAlignment);
 
     virtual void updateStats(AlignerStats* stats, Read* read, AlignmentResult result, int score, int mapq);
 

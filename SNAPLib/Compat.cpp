@@ -431,7 +431,7 @@ OpenMemoryMappedFile(
     bool sequential)
 {
     MemoryMappedFile* result = new MemoryMappedFile();
-    result->fileHandle = CreateFile(filename, (write ? GENERIC_WRITE : 0) | GENERIC_READ, 0, NULL, OPEN_EXISTING,
+    result->fileHandle = CreateFile(filename, (write ? GENERIC_WRITE : 0) | GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | (sequential ? FILE_FLAG_SEQUENTIAL_SCAN : FILE_FLAG_RANDOM_ACCESS), NULL);
     if (result->fileHandle == NULL) {
         WriteErrorMessage("unable to open mapped file %s error 0x%x\n", filename, GetLastError());
@@ -891,6 +891,13 @@ FileMapper::prefetch(size_t currentRead)
 void PreventMachineHibernationWhileThisThreadIsAlive()
 {
 	SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+}
+
+void SetToLowSchedulingPriority()
+{
+    if (!SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS)) {
+        WriteErrorMessage("Unable to set process to background priority class, %d.  Ignoring and proceeding at normal priority\n", GetLastError());
+    }
 }
 
 struct NamedPipe {
@@ -1948,6 +1955,12 @@ FileMapper::prefetch(size_t currentRead)
 void PreventMachineHibernationWhileThisThreadIsAlive()
 {
 	// Only implemented for Windows
+}
+
+void SetToLowSchedulingPriority()
+{
+    // Only implemented for Windows (the Linux version is per-thread, and I'm too lazy to do it now).
+    WriteErrorMessage("The Linux code for running at low priority is not implemented, so SNAP will run at normal priority\n");
 }
 
 //

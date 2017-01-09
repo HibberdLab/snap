@@ -13,7 +13,7 @@ Authors:
     Ravi Pandya, May, 2012
 
 Environment:
-`
+
     User mode service.
 
 Revision History:
@@ -94,6 +94,7 @@ struct AlignerOptions : public AbstractOptions
     bool                ignoreSecondaryAlignments; // on input, default true
     int                 maxSecondaryAlignmentAdditionalEditDistance;
 	int					maxSecondaryAlignments;
+    int                 maxSecondaryAlignmentsPerContig;
     bool                preserveClipping;
     float               expansionFactor;
     bool                noUkkonen;
@@ -102,6 +103,14 @@ struct AlignerOptions : public AbstractOptions
 	unsigned			minReadLength;
 	bool				mapIndex;
 	bool				prefetchIndex;
+    size_t              writeBufferSize;
+    bool                dropIndexBeforeSort;
+    bool                killIfTooSlow;
+    const char *        sortIntermediateDirectory;
+    bool                profile;
+    bool                ignoreAlignmentAdjustmentsForOm;
+    bool                emitInternalScore;
+    char                internalScoreTag[3];
     
     static bool         useHadoopErrorMessages; // This is static because it's global (and I didn't want to push the options object to every place in the code)
     static bool         outputToStdout;         // Likewise
@@ -121,7 +130,7 @@ struct AlignerOptions : public AbstractOptions
 		FilterTooShort =            0x0010
     };
 
-    bool passFilter(Read* read, AlignmentResult result, bool tooShort);
+    bool passFilter(Read* read, AlignmentResult result, bool tooShort, bool secondaryAlignment);
     
     virtual bool isPaired() { return false; }
 };

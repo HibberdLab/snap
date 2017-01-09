@@ -2,11 +2,11 @@
 
 Module Name:
 
-    bigalloc.cpp
+    BigAlloc.cpp
 
 Abstract:
 
-    Allocator that uses big pages where appropriate and possible.
+    Allocator that uses big pages where appropriate and possible, and page-aligns in any case to avoid false sharing.
 
 Authors:
 
@@ -21,8 +21,8 @@ Revision History:
 --*/
 
 #include "stdafx.h"
-#include "BigAlloc.h"
 #include "Compat.h"
+#include "BigAlloc.h"
 #include "exit.h"
 #include "Error.h"
 
@@ -33,6 +33,7 @@ bool BigAllocUseHugePages = false;
 
 struct ProfileEntry
 {
+    ProfileEntry() : caller(NULL), total(0), count(0) {}
     const char*   caller;
     size_t  total;
     size_t  count;
@@ -43,16 +44,16 @@ static int NCallers = 0;
 static int LastCaller = 0;
 static ProfileEntry AllocProfile[1000];
 
+static ProfileEntry ProfileTotal;
+static ProfileEntry LastPrintProfile;
+
 void *BigAllocInternal(
         size_t      sizeToAllocate,
         size_t      *sizeAllocated,
         bool        reserveOnly = FALSE,
         size_t      *pageSize = NULL);
 
-void *BigAllocProfile(
-        size_t      sizeToAllocate,
-        size_t      *sizeAllocated,
-        const char  *caller)
+void RecordAllocProfile(size_t bytes, const char* caller)
 {
     if (caller) {
         if (LastCaller >= NCallers || strcmp(AllocProfile[LastCaller].caller, caller)) {
@@ -65,16 +66,34 @@ void *BigAllocProfile(
             }
             if (LastCaller == NCallers && NCallers < MaxCallers) {
                 NCallers++;
-                AllocProfile[LastCaller].caller = caller;
+                char* buffer = (char*) malloc(strlen(caller) + 1);
+                strcpy(buffer, caller);
+                AllocProfile[LastCaller].caller = buffer;
                 AllocProfile[LastCaller].total = AllocProfile[LastCaller].count = 0;
             }
         }
         if (LastCaller < MaxCallers) {
             AllocProfile[LastCaller].count++;
-            AllocProfile[LastCaller].total += sizeToAllocate;
+            AllocProfile[LastCaller].total += bytes;
         }
     }
-    return BigAllocInternal(sizeToAllocate, sizeAllocated);
+    ProfileTotal.count++;
+    ProfileTotal.total += bytes;
+    if (ProfileTotal.count - LastPrintProfile.count >= 1000 || ProfileTotal.total - LastPrintProfile.total >= ((size_t)1 << 30)) {
+        fprintf(stderr, "BigAllocProfile %lld allocs, %lld total; caller %s alloc %lld\n", ProfileTotal.count, ProfileTotal.total, caller ? caller : "?", bytes);
+        LastPrintProfile = ProfileTotal;
+    }
+}
+
+void *BigAllocProfile(
+        size_t      sizeToAllocate,
+        size_t      *sizeAllocated,
+        const char  *caller)
+{
+    RecordAllocProfile(sizeToAllocate, caller);
+    void * result = BigAllocInternal(sizeToAllocate, sizeAllocated);
+    //WriteErrorMessage("!! BigAllocProfile %s 0x%llx-0x%llx %lld\n", caller, (_int64)result, (_int64)result + sizeToAllocate, sizeToAllocate);
+    return result;
 }
 
 #endif
@@ -291,9 +310,48 @@ Arguments:
 --*/
 {
     if (NULL == memory) return;
+#if 1
     VirtualFree(memory,0,MEM_RELEASE);
+#else
+    // for debugging dangling pointer read/writes
+    MEMORY_BASIC_INFORMATION info;
+    DWORD oldProtect;
+    VirtualQuery(memory, &info, sizeof(info));
+    VirtualProtect(memory, info.RegionSize, PAGE_NOACCESS, &oldProtect);
+    WriteErrorMessage("!! BigDealloc 0x%llx\n", (_int64)memory);
+#endif
 }
 
+#ifdef PROFILE_BIGALLOC
+void *BigReserveProfile(
+    size_t      sizeToReserve,
+    size_t      *sizeReserved,
+    size_t      *pageSize,
+    const char* caller)
+{
+    char buffer[1000];
+    strncpy(buffer, caller, sizeof(buffer));
+    strncat(buffer, "(RESERVE)", sizeof(buffer));
+    RecordAllocProfile(sizeToReserve, buffer);
+    return BigAllocInternal(sizeToReserve, sizeReserved, TRUE, pageSize);
+}
+
+bool BigCommitProfile(
+    void        *memoryToCommit,
+    size_t      sizeToCommit,
+    const char* caller)
+{
+    char buffer[1000];
+    strncpy(buffer, caller, sizeof(buffer));
+    strncat(buffer, "(COMMIT)", sizeof(buffer));
+    RecordAllocProfile(sizeToCommit, buffer);
+    void* allocatedMemory = VirtualAlloc(memoryToCommit, sizeToCommit, MEM_COMMIT, PAGE_READWRITE);
+    if (allocatedMemory == NULL) {
+        WriteErrorMessage("BigCommit VirtualAlloc failed with error 0x%x\n", GetLastError());
+    }
+    return allocatedMemory != NULL;
+}
+#else
 void *BigReserve(
         size_t      sizeToReserve,
         size_t      *sizeReserved,
@@ -303,8 +361,8 @@ void *BigReserve(
 }
 
 bool BigCommit(
-        void        *memoryToCommit,
-        size_t      sizeToCommit)
+    void        *memoryToCommit,
+    size_t      sizeToCommit)
 {
     void* allocatedMemory = VirtualAlloc(memoryToCommit, sizeToCommit, MEM_COMMIT, PAGE_READWRITE);
     if (allocatedMemory == NULL) {
@@ -312,6 +370,8 @@ bool BigCommit(
     }
     return allocatedMemory != NULL;
 }
+#endif
+
 
 #else /* no _MSC_VER */
 
